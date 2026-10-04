@@ -1,5 +1,7 @@
 # Requisitos · Fase 1
 
+Contrato: apps/payments-api/docs/openapi.yaml
+
 ## R1 · Crear y cobrar un pago
 WHEN un comercio envía POST /payments con cuerpo válido, header X-Merchant-Id y header Idempotency-Key
 THE SYSTEM SHALL crear el pago, intentar el cobro en la pasarela y responder 201 con el estado final,
