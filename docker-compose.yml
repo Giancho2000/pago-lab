@@ -17,5 +17,18 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2
+    environment:
+      DATABASE_URL: postgres://pagolab:pagolab@postgres:5432/pagolab?sslmode=disable
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db
+    command: ["--wait", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
