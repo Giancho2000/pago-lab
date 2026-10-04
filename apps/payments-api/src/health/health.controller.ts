@@ -10,7 +10,7 @@ export class HealthController implements BeforeApplicationShutdown {
     constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
 
     // Aca tenemos nuestro Liveness que nos informa si el proceso responde.
-    @Get('ready')
+    @Get('live')
     live() {
         return { status: 'ok' };
     }
