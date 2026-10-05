@@ -8,6 +8,7 @@ import { Payment } from './domain/payment.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { IdempotencyService } from './idempotency.service.js';
 import { PaymentsService } from './payments.service.js';
+import { PaymentStatus } from './domain/payment-status.js';
 
 @Controller('payments')
 export class PaymentsController {
@@ -28,8 +29,9 @@ export class PaymentsController {
     }
 
     const result = await this.idempotency.execute<Payment>(merchantId, key, dto, async () => {
-      const payment = await this.payments.create(merchantId, dto);
-      return { statusCode: HttpStatus.CREATED, body: payment };
+      const payment = await this.payments.createAndCharge(merchantId, dto);
+      const statusCode = payment.status === PaymentStatus.UNKNOWN ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
+      return { statusCode, body: payment };
     });
 
     res.status(result.statusCode);
