@@ -66,4 +66,30 @@ export class PaymentsRepository {
       return toPayment(rows[0]);
     });
   }
+
+    /**
+   * Reclama un lote para resolver. Transacción cortísima:
+   * - FOR UPDATE SKIP LOCKED: cada réplica toma filas distintas sin esperarse.
+   * - next_check_at funciona como "lease": nadie más las toma durante 30 segundos.
+   * La llamada a la pasarela se hace DESPUÉS, sin bloqueos abiertos.
+   */
+  async claimForResolution(limit: number): Promise<Payment[]> {
+    const { rows } = await this.pool.query<PaymentRow>(
+      `UPDATE payments
+          SET next_check_at = now() + interval '30 seconds',
+              attempts = attempts + 1
+        WHERE id IN (
+          SELECT id FROM payments
+           WHERE (status = 'UNKNOWN'
+                  OR (status = 'PROCESSING' AND updated_at < now() - interval '2 minutes'))
+             AND (next_check_at IS NULL OR next_check_at < now())
+           ORDER BY updated_at
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *`,
+      [limit],
+    );
+    return rows.map(toPayment);
+  }
 }
