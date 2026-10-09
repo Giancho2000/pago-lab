@@ -15,11 +15,11 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint src/ test/",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --project unit",
+    "test:watch": "vitest --project unit",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
+    "test:e2e": "vitest run --project e2e"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -41,17 +41,30 @@
     "@nestjs/mau": "^0.2.6",
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",
+    "@testcontainers/postgresql": "^12.2.0",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
-    "@types/supertest": "^7.0.0",
+    "@types/supertest": "^7.2.1",
     "@vitest/coverage-v8": "^4.1.2",
     "oxlint": "^1.58.0",
     "prettier": "^3.4.2",
     "source-map-support": "^0.5.21",
-    "supertest": "^7.0.0",
+    "supertest": "^7.3.1",
     "typescript": "^6.0.2",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^4.1.2"
+  },
+  "jest": {
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "roots": ["<rootDir>/src", "<rootDir>/test"],
+  "testRegex": ".*\\.(spec|int-spec)\\.ts$",
+  "transform": { "^.+\\.(t|j)s$": "ts-jest" },
+  "collectCoverageFrom": ["src/**/*.ts", "!src/main.ts", "!src/**/*.module.ts"],
+  "coverageDirectory": "coverage",
+  "coverageThreshold": { "global": { "lines": 85, "branches": 75 } },
+  "testEnvironment": "node",
+  "testTimeout": 60000
   }
 }
