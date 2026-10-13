@@ -1,9 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { Payment } from './domain/payment.js';
 import { PaymentStatus } from './domain/payment-status.js';
 import { GatewayClient } from './gateway.client.js';
 import { PaymentsRepository } from './payments.repository.js';
+import { isUUID } from 'class-validator';
 
 @Injectable()
 export class PaymentsService {
@@ -40,4 +41,17 @@ export class PaymentsService {
     if (!payment) throw new NotFoundException('Pago no encontrado');
     return payment;
   }
+
+  async list(merchantId: string, limit: number, cursor?: string) {
+    let afterId: string  | undefined;
+    if (cursor) {
+        afterId = Buffer.from(cursor, 'base64url').toString('utf8');
+        if (!isUUID(afterId)) throw new BadRequestException('Cursor inválido');
+      }
+    const items = await this.repo.listByMerchant(merchantId, limit, afterId);
+    const last = items.at(-1);
+    const nextCursor = items.length === limit && last ? Buffer.from(last.id).toString('base64url') : null;
+    return { items, nextCursor };
+  }
+
 }

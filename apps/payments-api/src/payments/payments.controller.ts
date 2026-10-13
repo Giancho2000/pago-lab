@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, Headers, HttpStatus, Param, ParseUUIDPipe, Post, Res,
+  BadRequestException, Body, Controller, Get, Headers, HttpStatus, Param, ParseUUIDPipe, Post, Query, Res,
 } from '@nestjs/common';
 import { isUUID } from 'class-validator';
 import type { Response } from 'express';
@@ -9,6 +9,7 @@ import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { IdempotencyService } from './idempotency.service.js';
 import { PaymentsService } from './payments.service.js';
 import { PaymentStatus } from './domain/payment-status.js';
+import { listPaymentQuery } from './dto/list-payments.query.js';
 
 @Controller('payments')
 export class PaymentsController {
@@ -38,6 +39,11 @@ export class PaymentsController {
     res.setHeader('Location', `/payments/${result.body.id}`);
     if (result.replayed) res.setHeader('Idempotent-Replayed', 'true');
     return result.body;
+  }
+
+  @Get()
+  list(@MerchantId() merchantId: string, @Query() query: listPaymentQuery) {
+    return this.payments.list(merchantId, query.limit, query.cursor);
   }
 
   @Get(':id')

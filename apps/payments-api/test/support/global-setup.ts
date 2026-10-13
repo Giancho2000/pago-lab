@@ -24,7 +24,9 @@ async function migrate(databaseUrl: string) {
       .filter((f) => f.endsWith('.sql'))
       .sort()) {
       const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
-      const up = sql.split('-- migrate:down')[0].replace('-- migrate:up', '');
+      const up = sql
+        .split('-- migrate:down')[0]
+        .replace(/^-- migrate:up.*$/m, ''); // incluye opciones como transaction:false
       await client.query(up);
     }
   } finally {
