@@ -1,0 +1,270 @@
+asyncapi: 3.1.0
+info:
+  title: PagoLab Payment Events
+  version: 1.0.0
+  description: |
+    Contrato de los eventos de pago que publica `payments-api` a través del
+    patrón transactional outbox. Garantía de entrega: al menos una vez
+    (at-least-once); los consumidores deben deduplicar por `eventId`.
+
+    Reglas de evolución del contrato:
+    - Agregar campos opcionales es compatible y mantiene `version: 1`.
+    - Eliminar o renombrar campos, o cambiar su tipo o significado, exige `version: 2`.
+    - Los consumidores deben ignorar los campos y los tipos de evento que no conozcan.
+
+servers:
+  local:
+    host: localhost:29092
+    protocol: kafka
+    description: Broker único en Docker Compose (desde la máquina anfitriona)
+  compose:
+    host: kafka:9092
+    protocol: kafka
+    description: Broker único en Docker Compose (desde otros contenedores)
+
+channels:
+  paymentEvents:
+    address: payments.events
+    title: Eventos de pago
+    description: Un mensaje por cada transición de un pago a un estado relevante.
+    messages:
+      paymentEvent:
+        $ref: '#/components/messages/PaymentEvent'
+    bindings:
+      kafka:
+        partitions: 6
+        replicas: 1
+        topicConfiguration:
+          retention.ms: 604800000
+        bindingVersion: 0.5.0
+
+  paymentEventsRetry:
+    address: payments.events.retry
+    title: Reintentos de entrega de webhooks
+    description: Mensajes cuya entrega falló con un error reintentable.
+    messages:
+      paymentEventRetry:
+        $ref: '#/components/messages/PaymentEventRetry'
+    bindings:
+      kafka:
+        partitions: 3
+        replicas: 1
+        bindingVersion: 0.5.0
+
+  paymentEventsDlt:
+    address: payments.events.dlt
+    title: Dead letter topic
+    description: Mensajes con error no reintentable o con los reintentos agotados.
+    messages:
+      paymentEventDead:
+        $ref: '#/components/messages/PaymentEventRetry'
+    bindings:
+      kafka:
+        partitions: 1
+        replicas: 1
+        topicConfiguration:
+          retention.ms: 2592000000
+        bindingVersion: 0.5.0
+
+operations:
+  publishPaymentEvents:
+    action: send
+    title: Outbox relay publica eventos
+    summary: El relay de payments-api publica los eventos del outbox (productor idempotente, acks=all).
+    channel:
+      $ref: '#/channels/paymentEvents'
+    messages:
+      - $ref: '#/channels/paymentEvents/messages/paymentEvent'
+
+  notifyMerchants:
+    action: receive
+    title: Notifier entrega webhooks
+    summary: Grupo `notifier`. Entrega cada evento al comercio con firma HMAC.
+    channel:
+      $ref: '#/channels/paymentEvents'
+    bindings:
+      kafka:
+        groupId:
+          type: string
+          const: notifier
+        bindingVersion: 0.5.0
+
+  recordLedger:
+    action: receive
+    title: Ledger actualiza saldos
+    summary: Grupo `ledger`. Aplica `payment.approved` exactamente una vez sobre los saldos.
+    channel:
+      $ref: '#/channels/paymentEvents'
+    bindings:
+      kafka:
+        groupId:
+          type: string
+          const: ledger
+        bindingVersion: 0.5.0
+
+  scheduleRetry:
+    action: send
+    title: Notifier deriva a reintento
+    channel:
+      $ref: '#/channels/paymentEventsRetry'
+
+  retryDelivery:
+    action: receive
+    title: Notifier reintenta entregas
+    summary: Grupo `notifier-retry`. Espera hasta `not-before` y reintenta la entrega.
+    channel:
+      $ref: '#/channels/paymentEventsRetry'
+    bindings:
+      kafka:
+        groupId:
+          type: string
+          const: notifier-retry
+        bindingVersion: 0.5.0
+
+  sendToDlt:
+    action: send
+    title: Notifier envía al DLT
+    channel:
+      $ref: '#/channels/paymentEventsDlt'
+
+components:
+  messages:
+    PaymentEvent:
+      name: PaymentEvent
+      title: Evento de pago
+      contentType: application/json
+      headers:
+        $ref: '#/components/schemas/PaymentEventHeaders'
+      payload:
+        $ref: '#/components/schemas/PaymentEvent'
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: Id del pago. Garantiza que los eventos de un pago caen en la misma partición y conservan su orden.
+          bindingVersion: 0.5.0
+      examples:
+        - name: pagoAprobado
+          headers:
+            event-id: 0b5c6f0e-3a51-4d36-9e0e-8a2f4d3c1b7a
+            event-type: payment.approved
+          payload:
+            eventId: 0b5c6f0e-3a51-4d36-9e0e-8a2f4d3c1b7a
+            type: payment.approved
+            version: 1
+            occurredAt: '2026-10-14T15:04:05.123Z'
+            data:
+              id: 7c1e2a9b-5d4f-4e3a-8b2c-1d0e9f8a7b6c
+              merchantId: merchant_demo
+              amountCents: 15000
+              currency: COP
+              status: APPROVED
+              gatewayRef: ch_8f3a2b1c
+        - name: pagoDesconocido
+          headers:
+            event-id: 4d2e8a1f-6b3c-4f9e-a7d5-2c1b0e9f8d7a
+            event-type: payment.unknown
+          payload:
+            eventId: 4d2e8a1f-6b3c-4f9e-a7d5-2c1b0e9f8d7a
+            type: payment.unknown
+            version: 1
+            occurredAt: '2026-10-14T15:04:07.456Z'
+            data:
+              id: 9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d
+              merchantId: merchant_demo
+              amountCents: 20000
+              currency: COP
+              status: UNKNOWN
+              gatewayRef: null
+
+    PaymentEventRetry:
+      name: PaymentEventRetry
+      title: Evento de pago en reintento o en el DLT
+      description: Mismo cuerpo y misma clave que el mensaje original, con cabeceras de control.
+      contentType: application/json
+      headers:
+        $ref: '#/components/schemas/RetryHeaders'
+      payload:
+        $ref: '#/components/schemas/PaymentEvent'
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+          bindingVersion: 0.5.0
+
+  schemas:
+    PaymentEvent:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, version, occurredAt, data]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Identificador único del evento. Clave de deduplicación en todos los consumidores.
+        type:
+          type: string
+          enum: [payment.approved, payment.declined, payment.failed, payment.unknown]
+        version:
+          type: integer
+          const: 1
+        occurredAt:
+          type: string
+          format: date-time
+          description: Instante (UTC) en que se registró la transición.
+        data:
+          $ref: '#/components/schemas/PaymentSnapshot'
+
+    PaymentSnapshot:
+      type: object
+      description: Estado del pago tras la transición. Solo incluye los campos que un consumidor externo necesita.
+      required: [id, merchantId, amountCents, currency, status, gatewayRef]
+      properties:
+        id:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+        amountCents:
+          type: integer
+          minimum: 1
+          maximum: 1000000000
+        currency:
+          type: string
+          enum: [COP, USD]
+        status:
+          type: string
+          enum: [APPROVED, DECLINED, FAILED, UNKNOWN]
+        gatewayRef:
+          type: [string, 'null']
+          description: Referencia del cobro en la pasarela; `null` si la pasarela no la informó.
+
+    PaymentEventHeaders:
+      type: object
+      required: [event-id, event-type]
+      properties:
+        event-id:
+          type: string
+          format: uuid
+        event-type:
+          type: string
+
+    RetryHeaders:
+      type: object
+      required: [attempt, not-before, last-error, original-topic]
+      properties:
+        attempt:
+          type: string
+          description: Número de intento (1, 2, 3…). Como cabecera de Kafka viaja como texto.
+        not-before:
+          type: string
+          description: Instante (epoch en milisegundos) a partir del cual puede reintentarse.
+        last-error:
+          type: string
+          maxLength: 500
+          description: Mensaje del último error.
+        original-topic:
+          type: string
+          const: payments.events
