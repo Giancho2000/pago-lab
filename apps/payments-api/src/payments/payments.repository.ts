@@ -92,4 +92,29 @@ export class PaymentsRepository {
     );
     return rows.map(toPayment);
   }
+
+  async listByMerchant(
+    merchantId: string,
+    limit: number,
+    afterId?: string ,
+  ): Promise<Payment[]> {
+    // Keyset: "dame los siguientes a este punto" en lugar de "salta N filas"
+    const { rows } = afterId
+      ? await this.pool.query<PaymentRow>(
+          `SELECT * FROM payments
+            WHERE merchant_id = $1
+              AND (created_at, id) < (SELECT created_at, id FROM payments WHERE id = $2 AND merchant_id = $1)
+            ORDER BY created_at DESC, id DESC
+            LIMIT $3`,
+          [merchantId, afterId, limit],
+        )
+      : await this.pool.query<PaymentRow>(
+          `SELECT * FROM payments
+            WHERE merchant_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2`,
+          [merchantId, limit],
+        );
+    return rows.map(toPayment);
+  }
 }
