@@ -331,4 +331,105 @@ describe('Pagos (e2e)', () => {
         .expect(401);
     });
   });
+
+  describe('R8 · listado paginado por cursor', () => {
+    // Inserta pagos con created_at exactos (con microsegundos) para controlar el orden
+    const seedAt = async (createdAts: string[], merchantId = merchant) => {
+      const { rows } = await pool.query<{ id: string; created_at: string }>(
+        `INSERT INTO payments (merchant_id, amount_cents, currency, status, created_at)
+         SELECT $1, 1000, 'COP', 'APPROVED', t FROM unnest($2::timestamptz[]) AS t
+         RETURNING id, created_at::text`,
+        [merchantId, createdAts],
+      );
+      return rows;
+    };
+
+    // Recorre todas las páginas siguiendo nextCursor, como lo haría un cliente
+    const listAll = async (limit: number) => {
+      const pages: string[][] = [];
+      let cursor: string | null = null;
+      do {
+        const res: request.Response = await request(app.getHttpServer())
+          .get('/payments')
+          .query(cursor ? { limit, cursor } : { limit })
+          .set('X-Merchant-Id', merchant)
+          .expect(200);
+        pages.push(res.body.items.map((p: { id: string }) => p.id));
+        cursor = res.body.nextCursor;
+      } while (cursor && pages.length < 20);
+      return pages;
+    };
+
+    const newestFirst = (rows: { id: string; created_at: string }[]) =>
+      [...rows]
+        .sort(
+          (a, b) =>
+            b.created_at.localeCompare(a.created_at) ||
+            b.id.localeCompare(a.id),
+        )
+        .map((r) => r.id);
+
+    it('recorre todas las páginas del más reciente al más antiguo, sin huecos ni repetidos, solo del comercio', async () => {
+      const rows = await seedAt([
+        '2026-01-05T10:00:00Z',
+        '2026-01-04T10:00:00Z',
+        '2026-01-04T10:00:00Z', // empate en created_at: desempata el id
+        '2026-01-03T10:00:00Z',
+        '2026-01-01T10:00:00Z',
+      ]);
+      await seedAt(['2026-01-04T12:00:00Z'], `m_${randomUUID()}`); // otro comercio
+
+      const pages = await listAll(2);
+
+      expect(pages.map((p) => p.length)).toEqual([2, 2, 1]); // la última página trae nextCursor null
+      expect(pages.flat()).toEqual(newestFirst(rows));
+    });
+
+    it('no pierde pagos creados en el mismo milisegundo', async () => {
+      // created_at guarda microsegundos; JS (toISOString) solo milisegundos
+      const rows = await seedAt([
+        '2026-01-01T10:00:00.000500Z',
+        '2026-01-01T10:00:00.000100Z',
+      ]);
+
+      expect((await listAll(1)).flat()).toEqual(newestFirst(rows));
+    });
+
+    it('sin limit usa 20 por página', async () => {
+      await seedAt(
+        Array.from(
+          { length: 21 },
+          (_, i) => `2026-01-01T10:00:${String(i).padStart(2, '0')}Z`,
+        ),
+      );
+      const res = await request(app.getHttpServer())
+        .get('/payments')
+        .set('X-Merchant-Id', merchant)
+        .expect(200);
+      expect(res.body.items).toHaveLength(20);
+      expect(res.body.nextCursor).toEqual(expect.any(String));
+    });
+
+    it.each([
+      ['limit=0', { limit: 0 }],
+      ['limit=101', { limit: 101 }],
+      ['limit no numérico', { limit: 'abc' }],
+      ['cursor que no es base64/JSON', { cursor: 'basura' }],
+      [
+        'cursor bien codificado pero con datos inválidos',
+        {
+          cursor: Buffer.from(
+            JSON.stringify({ createdAt: 'ayer', id: '1' }),
+          ).toString('base64url'),
+        },
+      ],
+    ])('%s → 400', async (_, query) => {
+      const res = await request(app.getHttpServer())
+        .get('/payments')
+        .query(query)
+        .set('X-Merchant-Id', merchant)
+        .expect(400);
+      expect(res.headers['content-type']).toContain('application/problem+json');
+    });
+  });
 });
