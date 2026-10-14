@@ -18,6 +18,7 @@ export class IdempotencyService {
     key: string,
     payload: unknown,
     handler: () => Promise<{ statusCode: number; body: T }>,
+    recover?: () => Promise<{ statusCode: number; body: T } | null>,
   ): Promise<IdempotentResult<T>> {
     const requestHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 
@@ -43,8 +44,20 @@ export class IdempotencyService {
       if (existing.request_hash !== requestHash) {
         throw new UnprocessableEntityException('La Idempotency-Key ya se usó con otro cuerpo');
       }
-      if (existing.status === 'IN_PROGRESS') {
-        throw new ConflictException('La petición original sigue en proceso; reintenta en unos segundos');
+       if (existing.status === 'IN_PROGRESS') {
+        if (existing.locked_until > new Date()) {
+          throw new ConflictException('La petición original sigue en proceso; reintenta en unos segundos');
+        }
+        // El bloqueo venció: el proceso original probablemente murió
+        const recovered = recover ? await recover() : null;
+        if (recovered) return { ...recovered, replayed: true };
+
+        // No alcanzó a crear el pago: liberamos la clave y volvemos a intentar el reclamo
+        await this.pool.query(
+          `DELETE FROM idempotency_keys WHERE merchant_id = $1 AND key = $2 AND status = 'IN_PROGRESS'`,
+          [merchantId, key],
+        );
+        return this.execute(merchantId, key, payload, handler, recover);
       }
       return { statusCode: existing.response_code, body: existing.response_body as T, replayed: true };
     }
