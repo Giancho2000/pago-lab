@@ -8,7 +8,7 @@ import { Payment } from './domain/payment.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { IdempotencyService } from './idempotency.service.js';
 import { PaymentsService } from './payments.service.js';
-import { PaymentStatus } from './domain/payment-status.js';
+import { isFinal, PaymentStatus } from './domain/payment-status.js';
 import { listPaymentQuery } from './dto/list-payments.query.js';
 
 @Controller('payments')
@@ -29,11 +29,22 @@ export class PaymentsController {
       throw new BadRequestException('Idempotency-Key es obligatorio y debe ser un UUID');
     }
 
-    const result = await this.idempotency.execute<Payment>(merchantId, key, dto, async () => {
-      const payment = await this.payments.createAndCharge(merchantId, dto);
-      const statusCode = payment.status === PaymentStatus.UNKNOWN ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
-      return { statusCode, body: payment };
-    });
+     const result = await this.idempotency.execute<Payment>(
+      merchantId,
+      key,
+      dto,
+      async () => {
+        const payment = await this.payments.createAndCharge(merchantId, dto, key);
+        const statusCode = payment.status === PaymentStatus.UNKNOWN ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
+        return { statusCode, body: payment };
+      },
+      // Solo se usa si la clave quedó huérfana (IN_PROGRESS con el bloqueo vencido)
+      async () => {
+        const payment = await this.payments.findByIdempotencyKey(merchantId, key);
+        if (!payment) return null;
+        return { statusCode: isFinal(payment.status) ? HttpStatus.CREATED : HttpStatus.ACCEPTED, body: payment };
+      },
+    );
 
     res.status(result.statusCode);
     res.setHeader('Location', `/payments/${result.body.id}`);

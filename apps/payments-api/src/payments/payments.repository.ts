@@ -10,6 +10,7 @@ export interface NewPayment {
   amountCents: number;
   currency: string;
   description?: string;
+  idempotencyKey?: string;
 }
 
 @Injectable()
@@ -18,12 +19,20 @@ export class PaymentsRepository {
 
   async insert(data: NewPayment): Promise<Payment> {
     const { rows } = await this.pool.query<PaymentRow>(
-      `INSERT INTO payments (merchant_id, amount_cents, currency, description)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO payments (merchant_id, amount_cents, currency, description, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [data.merchantId, data.amountCents, data.currency, data.description ?? null],
+      [data.merchantId, data.amountCents, data.currency, data.description ?? null, data.idempotencyKey ?? null],
     );
     return toPayment(rows[0]);
+  }
+
+   async findByIdempotencyKey(merchantId: string, key: string): Promise<Payment | null> {
+    const { rows } = await this.pool.query<PaymentRow>(
+      `SELECT * FROM payments WHERE merchant_id = $1 AND idempotency_key = $2`,
+      [merchantId, key],
+    );
+    return rows[0] ? toPayment(rows[0]) : null;
   }
 
   async findById(id: string, merchantId: string): Promise<Payment | null> {
