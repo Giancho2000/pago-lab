@@ -1,5 +1,5 @@
 import { INestApplication } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { PaymentsRepository } from '../src/payments/payments.repository.js';
@@ -247,6 +247,72 @@ describe('Pagos (e2e)', () => {
 
       const retry = await createPayment({ key }).expect(201);
       expect(retry.headers['idempotent-replayed']).toBeUndefined();
+    });
+  });
+
+  describe('R11 · claves de idempotencia huérfanas', () => {
+    // Simula que el proceso murió a mitad del cobro: la clave quedó IN_PROGRESS y su bloqueo venció
+    const orphan = (key: string) =>
+      pool.query(
+        `UPDATE idempotency_keys
+            SET status = 'IN_PROGRESS', response_code = NULL, response_body = NULL,
+                locked_until = now() - interval '1 minute'
+          WHERE key = $1`,
+        [key],
+      );
+
+    it.each([
+      ['final', 'approve', 201],
+      ['UNKNOWN', 'error', 202],
+    ] as const)(
+      'con pago %s → devuelve ese pago (%s → %i) sin volver a cobrar',
+      async (_, behavior, status) => {
+        const key = randomUUID();
+        gateway.next(behavior);
+        const original = await createPayment({ key }).expect(status);
+        await orphan(key);
+
+        const retry = await createPayment({ key }).expect(status);
+
+        expect(retry.body).toEqual(original.body);
+        expect(retry.headers['idempotent-replayed']).toBe('true');
+        expect(gateway.chargeCalls).toHaveLength(1);
+      },
+    );
+
+    it('sin pago (murió antes de crearlo) → libera la clave y procesa como nueva', async () => {
+      const key = randomUUID();
+      const hash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+      await pool.query(
+        `INSERT INTO idempotency_keys (merchant_id, key, request_hash, locked_until)
+         VALUES ($1, $2, $3, now() - interval '1 minute')`,
+        [merchant, key, hash],
+      );
+
+      const res = await createPayment({ key }).expect(201);
+
+      expect(res.headers['idempotent-replayed']).toBeUndefined();
+      expect(gateway.chargeCalls).toEqual([res.body.id]);
+      const { rows } = await pool.query(
+        `SELECT status FROM idempotency_keys WHERE merchant_id = $1 AND key = $2`,
+        [merchant, key],
+      );
+      expect(rows).toEqual([{ status: 'COMPLETED' }]);
+    });
+
+    it('la BD rechaza dos pagos con el mismo comercio y la misma clave', async () => {
+      const key = randomUUID();
+      const insert = () =>
+        pool.query(
+          `INSERT INTO payments (merchant_id, amount_cents, currency, idempotency_key)
+           VALUES ($1, 100, 'COP', $2)`,
+          [merchant, key],
+        );
+      await insert();
+      await expect(insert()).rejects.toMatchObject({
+        code: '23505', // unique_violation
+        constraint: 'ux_payments_merchant_idem',
+      });
     });
   });
 

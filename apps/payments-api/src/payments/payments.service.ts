@@ -13,8 +13,8 @@ export class PaymentsService {
     private readonly gateway: GatewayClient,
   ) {}
 
-  async createAndCharge(merchantId: string, dto: CreatePaymentDto): Promise<Payment> {
-    const payment = await this.repo.insert({ merchantId, ...dto });
+  async createAndCharge(merchantId: string, dto: CreatePaymentDto, idempotencyKey: string): Promise<Payment> {
+    const payment = await this.repo.insert({ merchantId, ...dto, idempotencyKey });
 
     // Reclamo el pago: solo un proceso puede pasarlo a PROCESSING
     const claimed = await this.repo.transition(payment.id, PaymentStatus.PENDING, PaymentStatus.PROCESSING, {
@@ -34,6 +34,10 @@ export class PaymentsService {
       reason: result.reason,
     });
     return final ?? this.getOrFail(payment.id, merchantId);
+  }
+
+  findByIdempotencyKey(merchantId: string, key: string): Promise<Payment | null> {
+    return this.repo.findByIdempotencyKey(merchantId, key);
   }
 
   async getOrFail(id: string, merchantId: string): Promise<Payment> {
