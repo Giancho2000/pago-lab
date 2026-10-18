@@ -35,5 +35,5 @@ export async function createTestApp(
 }
 
 export async function truncateAll(pool: Pool) {
-  await pool.query('TRUNCATE payment_events, payments, idempotency_keys');
+  await pool.query('TRUNCATE outbox, payment_events, payments, idempotency_keys');
 }

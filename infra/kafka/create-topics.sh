@@ -15,13 +15,3 @@ $T --bootstrap-server $B --create --if-not-exists --topic payments.events.dlt \
 
 $T --bootstrap-server $B --list
 
-pago-1:m1
-pago-2:m1
-pago-1:m2
-pago-2:m2
-pago-1:m3
-pago-2:m3
-pago-1:m4
-pago-2:m4
-pago-1:m5
-pago-2:m5
