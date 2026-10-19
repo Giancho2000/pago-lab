@@ -189,6 +189,17 @@ sequenceDiagram
   Note over R,K: Si el proceso muere entre el ack y el COMMIT,<br/>el lote se vuelve a publicar (at-least-once).
 ```
 
+**Implementación del relay (T17)** · `src/messaging/outbox-relay.ts`
+
+| Aspecto | Decisión | Por qué |
+|---|---|---|
+| Garantía | **Al menos una vez**: `published_at` se marca después del ack, en la misma transacción que leyó el lote | Si el proceso muere entre `send` y `COMMIT`, el lote se reenvía con los mismos `event-id`. Los consumidores **deben** ser idempotentes (T19, T21). Ver § 8 |
+| Red dentro de la transacción | `producer.send` ocurre con la transacción abierta y las filas bloqueadas | Trade-off consciente (D2). Consecuencia: con Kafka caído, KafkaJS reintenta dentro de la transacción y retiene **1 conexión del pool** y los bloqueos mientras dura. Con un solo relay y un pool de 10 conexiones es aceptable |
+| Concurrencia | `FOR UPDATE SKIP LOCKED` | Un segundo lote (otro tick u otra instancia por error) salta las filas tomadas en vez de esperar o duplicarlas. No garantiza orden entre instancias: por eso el relay corre en **una sola instancia** (D3, § 9) |
+| Ciclo | `@Interval(1000)` con la bandera `running`; cada tick vacía el backlog en lotes de 100 | La bandera evita que dos ticks de la misma réplica se solapen. Un error se registra y libera el siguiente tick: el relay nunca se queda detenido |
+| Kafka caído | El error revierte la transacción; los eventos siguen pendientes y el siguiente tick reintenta | Cumple R15 sin intervención manual. Contra: se registra un error por tick mientras dure la caída |
+| Limpieza | `@Cron` diario (03:00) que borra lo publicado hace más de 7 días, solo donde `RELAY_ENABLED=true` (D11) | `published_at < …` nunca es verdadero con `NULL`: un evento pendiente no se borra aunque tenga semanas |
+
 ### 6.2 Entrega de webhooks con reintentos (R16, R18)
 
 ```mermaid
@@ -335,7 +346,7 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | Recuperación de claves (R11) | Integración (Testcontainers) | Clave huérfana con pago → mismo pago sin volver a cobrar · huérfana sin pago → se procesa como nueva · bloqueo vigente → `409` · dos pagos con la misma clave → la BD lo rechaza |
 | Outbox (R12) | Integración | Pago aprobado → exactamente 1 evento · `UNKNOWN → APPROVED` → 2 eventos en orden · fallo después del `UPDATE` → ni cambio ni evento |
 | `buildPaymentEvent` (R13) | Unitaria | Mapeo estado → tipo · `PENDING`/`PROCESSING` → `null` · forma conforme al contrato |
-| Relay (R15) | Integración (Testcontainers con Kafka, o productor falso) | Publica con la clave correcta y marca `published_at` · si `send` falla, no marca nada · lote vacío → 0 |
+| Relay (R15) | Integración (Postgres de Testcontainers + productor falso) · unitaria del ciclo | Clave = id del pago, cabeceras y orden de creación; no repite lo publicado · si `send` falla no marca nada y el reintento reenvía el mismo lote · dos lotes concurrentes no duplican (`SKIP LOCKED`) · la limpieza borra solo lo publicado hace más de 7 días · `tick` vacía el backlog y sobrevive a un error |
 | Firma (R16) | Unitaria | Firma determinista con un `now` fijo · el receptor acepta la propia firma |
 | Clasificación de errores (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
 | Ledger (R19) | Integración | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado · saldos = suma de aprobados |
@@ -358,6 +369,7 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | D8 | **Kafka 3.9 en KRaft** | Kafka 4.x · ZooKeeper | KRaft elimina ZooKeeper. Kafka 4 retiró protocolos que KafkaJS aún usa |
 | D9 | **Schema por servicio en una sola instancia** | Una base por servicio | Aislamiento lógico con costo cero en el laboratorio. Migrar a bases separadas no cambia el código |
 | D10 | **Eventos con estado completo** | Solo el id (*notificación*) | Los consumidores no dependen de que `payments-api` esté disponible |
+| D11 | **Limpieza del outbox con `@Cron` diario dentro del relay** | `@Interval(24 h)` · particionar `outbox` por fecha · retención en un job externo | El contador de `@Interval` se reinicia en cada despliegue: con más de un despliegue al día no se ejecutaría nunca. El `DELETE` diario basta para el volumen del laboratorio; con mucho volumen, particionar por día y hacer `DROP PARTITION` evita el costo del `DELETE` |
 
 ---
 

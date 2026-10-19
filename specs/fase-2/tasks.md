@@ -35,20 +35,20 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
   - `IdempotencyService.execute` recibe el parámetro `recover` y trata la clave `IN_PROGRESS` vencida.
   - `PaymentsController` pasa `recover`, usando `isFinal` de `payment-status.ts`.
 - **Verificación:**
-  - [ ] Clave huérfana con pago → devuelve el mismo pago, `Idempotent-Replayed: true` y la pasarela no vuelve a cobrar.
-  - [ ] Clave huérfana sin pago → se procesa como nueva.
-  - [ ] Insertar dos pagos con la misma (`merchant_id`, `idempotency_key`) falla en la BD.
-  - [ ] `npm run test:cov` en verde y ≥ 85 %.
+  - [x] Clave huérfana con pago → devuelve el mismo pago, `Idempotent-Replayed: true` y la pasarela no vuelve a cobrar.
+  - [x] Clave huérfana sin pago → se procesa como nueva.
+  - [x] Insertar dos pagos con la misma (`merchant_id`, `idempotency_key`) falla en la BD.
+  - [x] `npm run test:cov` en verde y ≥ 85 %.
 - **Commit:** `fix: recuperacion de claves de idempotencia huerfanas`
 
 ### T15 · Kafka KRaft, Kafka UI y topics
 - **Requisitos:** R14
 - **Entregables:** servicios `kafka`, `kafka-init` y `kafka-ui` en Compose; volumen `kafkadata`; script `infra/kafka/create-topics.sh`.
 - **Verificación:**
-  - [ ] `kafka` en estado *healthy* y los 3 topics visibles en http://localhost:8081.
-  - [ ] `--describe` muestra 6 / 3 / 1 particiones.
-  - [ ] Experimento: misma clave → misma partición → mismo orden.
-  - [ ] Topic de pruebas limpiado (borrado y recreado).
+  - [x] `kafka` en estado *healthy* y los 3 topics visibles en http://localhost:8081.
+  - [x] `--describe` muestra 6 / 3 / 1 particiones.
+  - [x] Experimento: misma clave → misma partición → mismo orden.
+  - [x] Topic de pruebas limpiado (borrado y recreado).
 - **Commit:** `chore: kafka kraft, kafka-ui y creacion de topics`
 
 ### T16 · Transactional outbox
@@ -58,10 +58,10 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
   - `src/payments/domain/payment-events.ts` con `buildPaymentEvent`.
   - Inserción en `outbox` dentro de `PaymentsRepository.transition`.
 - **Verificación:**
-  - [ ] Pago aprobado → exactamente 1 fila con `event_type = 'payment.approved'`.
-  - [ ] `UNKNOWN → APPROVED` → 2 eventos, en orden.
-  - [ ] Fallo simulado después del `UPDATE` → ni cambio ni evento.
-  - [ ] El `payload` cumple el esquema `PaymentEvent` de `asyncapi.yaml`.
+  - [x] Pago aprobado → exactamente 1 fila con `event_type = 'payment.approved'`.
+  - [x] `UNKNOWN → APPROVED` → 2 eventos, en orden.
+  - [x] Fallo simulado después del `UPDATE` → ni cambio ni evento.
+  - [x] El `payload` cumple el esquema `PaymentEvent` de `asyncapi.yaml`.
 - **Commit:** `feat: transactional outbox para eventos de pagos`
 
 ### T17 · Outbox relay hacia Kafka
@@ -74,9 +74,9 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
   - Variables en `.env`, `.env.example` y Compose.
   - Ajustes A1–A4.
 - **Verificación:**
-  - [ ] 10 pagos creados → 10 mensajes en Kafka UI con clave = id del pago y cabeceras `event-id` y `event-type`.
-  - [ ] `docker compose stop kafka`, crear pagos, levantar Kafka → los eventos pendientes se publican solos.
-  - [ ] Pruebas del relay en verde; cobertura ≥ 85 %.
+  - [x] 10 pagos creados → 10 mensajes en Kafka UI con clave = id del pago y cabeceras `event-id` y `event-type`.
+  - [x] `docker compose stop kafka`, crear pagos, levantar Kafka → los eventos pendientes se publican solos.
+  - [x] Pruebas del relay en verde; cobertura ≥ 85 %.
 - **Commit:** `feat: outbox relay hacia kafka con productor idempotente`
 
 ### T18 · Comercio simulado con verificación HMAC
