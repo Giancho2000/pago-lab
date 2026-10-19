@@ -47,6 +47,8 @@ services:
       GATEWAY_URL: http://gateway-sim:4000
       GATEWAY_TIMEOUT_MS: "2000"
       RESOLVER_ENABLED: "true"
+      KAFKA_BROKERS: kafka:9092  
+      RELAY_ENABLED: "true"
     ports:
       - "3000:3000"
     init: true
@@ -55,6 +57,8 @@ services:
         condition: service_completed_successfully
       gateway-sim:
         condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
 
   kafka:
     image: apache/kafka:3.9.0
