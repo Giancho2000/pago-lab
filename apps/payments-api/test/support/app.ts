@@ -4,9 +4,20 @@ import { inject } from 'vitest';
 import { AppModule } from '../../src/app.module.js';
 import { configureApp } from '../../src/app.setup.js';
 import { PG_POOL } from '../../src/database/database.module.js';
+import { KAFKA_PRODUCER } from '../../src/messaging/kafka.module.js';
 import { FakeGateway } from './fake-gateway.js';
 
 export const GATEWAY_TIMEOUT_MS = 500;
+
+/** Reemplaza al productor de KafkaJS: la app arranca sin broker y las pruebas inspeccionan `send`. */
+export function createFakeProducer() {
+  return {
+    connect: vitest.fn().mockResolvedValue(undefined),
+    disconnect: vitest.fn().mockResolvedValue(undefined),
+    send: vitest.fn().mockResolvedValue([]),
+  };
+}
+export type FakeProducer = ReturnType<typeof createFakeProducer>;
 
 /**
  * Levanta la app completa contra el Postgres de Testcontainers y la pasarela falsa.
@@ -22,18 +33,24 @@ export async function createTestApp(
     GATEWAY_URL: gateway.url,
     GATEWAY_TIMEOUT_MS: String(GATEWAY_TIMEOUT_MS),
     RESOLVER_ENABLED: 'false', // el resolver se invoca a mano en las pruebas
+    RELAY_ENABLED: 'false', // el relay también
+    KAFKA_BROKERS: 'localhost:9', // no se lee (el factory queda reemplazado), pero no depende del .env
     ...env,
   });
 
+  const producer = createFakeProducer();
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
-  }).compile();
+  })
+    .overrideProvider(KAFKA_PRODUCER)
+    .useValue(producer)
+    .compile();
   const app = moduleRef.createNestApplication({ logger: false });
   configureApp(app);
   await app.init();
-  return { app, pool: app.get<Pool>(PG_POOL) };
+  return { app, pool: app.get<Pool>(PG_POOL), producer };
 }
 
 export async function truncateAll(pool: Pool) {
-  await pool.query('TRUNCATE payment_events, payments, idempotency_keys');
+  await pool.query('TRUNCATE outbox, payment_events, payments, idempotency_keys');
 }

@@ -4,6 +4,7 @@ import { PG_POOL } from '../database/database.module.js';
 import { withTransaction } from '../common/transaction.js';
 import { Payment, PaymentRow, toPayment } from './domain/payment.js';
 import { canTransition, PaymentStatus } from './domain/payment-status.js';
+import { buildPaymentEvent } from './domain/payment-events.js';
 
 export interface NewPayment {
   merchantId: string;
@@ -56,6 +57,7 @@ export class PaymentsRepository {
     if (!canTransition(from, to)) {
       throw new Error(`Transición inválida: ${from} → ${to}`);
     }
+
     return withTransaction(this.pool, async (client) => {
       const { rows } = await client.query<PaymentRow>(
         `UPDATE payments
@@ -66,13 +68,23 @@ export class PaymentsRepository {
           RETURNING *`,
         [id, from, to, opts.gatewayRef ?? null],
       );
+
       if (rows.length === 0) return null; // otro proceso ganó la carrera
       await client.query(
         `INSERT INTO payment_events (payment_id, from_status, to_status, reason)
          VALUES ($1, $2, $3, $4)`,
         [id, from, to, opts.reason ?? null],
       );
-      return toPayment(rows[0]);
+
+      const updated = toPayment(rows[0]);
+      const event = buildPaymentEvent(updated);
+      if (event) {
+        await client.query(
+          `INSERT INTO outbox (id, aggregate_id, event_type, payload) VALUES ($1, $2, $3, $4)`,
+          [event.eventId, updated.id, event.type, JSON.stringify(event)],
+        );
+      }
+      return updated;
     });
   }
 
