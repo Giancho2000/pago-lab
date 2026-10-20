@@ -21,6 +21,8 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 | A5 | `infra/kafka/create-topics.sh` (T15) | El `.gitattributes` ya fuerza LF. Si el archivo se creó antes con CRLF, `sh` falla con `\r: not found`: ejecuta `git add --renormalize .` |
 | A6 | `vitest.config.ts` | Los servicios nuevos (`apps/notifier`, `apps/ledger`) tienen su propio `package.json` y sus propias pruebas; la cobertura ≥ 85 % de R22 aplica a `payments-api` |
 | A7 | Git Bash | Para enviar un archivo a un contenedor, usa `docker compose exec -T … < archivo`. Las rutas como `/tmp/x` se traducen a rutas de Windows (`MSYS_NO_PATHCONV=1` lo evita) |
+| A8 | `apps/merchant-sim/src/server.js` (T18) | Envuelve `JSON.parse` en `try/catch` y responde `400`. Sin eso, un cuerpo no JSON con firma válida produce un `500` de Express, que el notifier reintentaría (R17, design § 7) |
+| A9 | `docker-compose.yml` (T18) | Declara `FAIL_RATE: ${FAIL_RATE:-0.2}` en lugar de un valor fijo. Así T18–T20 cambian la tasa sin editar el archivo: `FAIL_RATE=0 docker compose up -d merchant-sim`. Agrega también `init: true`, como en `gateway-sim` |
 
 ---
 
@@ -81,12 +83,16 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 
 ### T18 · Comercio simulado con verificación HMAC
 - **Requisitos:** R17
-- **Entregables:** `apps/merchant-sim` (Express, ESM), su Dockerfile y el servicio en Compose (puerto `4100`, `WEBHOOK_SECRET`, `FAIL_RATE`).
-- **Verificación:**
-  - [ ] Firma válida → `200`.
-  - [ ] Cuerpo alterado → `401`.
-  - [ ] `t` de hace 10 minutos → `400`.
-  - [ ] El mismo `eventId` dos veces → duplicado.
+- **Entregables:** `apps/merchant-sim` (Express, ESM), su Dockerfile y el servicio en Compose (puerto `4100`, `WEBHOOK_SECRET`, `FAIL_RATE`). Ajustes A8 y A9.
+- **Verificación** (con `FAIL_RATE=0`):
+  - [x] Firma válida → `200`.
+  - [x] Cuerpo alterado → `401`.
+  - [x] `t` alterado sin volver a firmar → `401`.
+  - [x] `t` de hace 10 minutos → `400`.
+  - [x] Sin cabecera de firma → `400`.
+  - [x] Cuerpo no JSON con firma válida → `400`.
+  - [x] El mismo `eventId` dos veces → duplicado.
+  - [x] Con `FAIL_RATE=0.2`, alrededor del 20 % de los webhooks válidos responde `500`.
 - **Commit:** `feat: comercio simulado con verificacion hmac de webhooks`
 
 ### T19 · Notifier con commits manuales y entrega idempotente
