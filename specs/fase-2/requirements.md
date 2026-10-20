@@ -90,7 +90,10 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 - THE SYSTEM SHALL comparar firmas en tiempo constante.
 - IF la marca de tiempo de la firma difiere en más de 300 segundos de la hora actual, THEN THE SYSTEM SHALL responder `400`.
 - IF la firma no coincide, THEN THE SYSTEM SHALL responder `401`.
+- IF la cabecera `PagoLab-Signature` falta o no tiene el formato `t=<segundos>,v1=<hex>`, THEN THE SYSTEM SHALL responder `400`.
+- IF la firma es válida pero el cuerpo no es JSON válido, THEN THE SYSTEM SHALL responder `400` (nunca `5xx`, para que el emisor no lo reintente).
 - IF el `eventId` ya fue procesado, THEN THE SYSTEM SHALL responder `200` indicando que es un duplicado y no reprocesarlo.
+- WHERE `FAIL_RATE` es mayor que 0, THE SYSTEM SHALL responder `500` a esa proporción de webhooks válidos, para simular un comercio inestable (T20).
 
 ## R18 · Reintentos y dead letter topic
 *Ticket T20*

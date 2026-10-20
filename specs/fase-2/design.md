@@ -266,9 +266,12 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 **Verificación en el receptor**, en este orden:
 
 1. Leer el cuerpo **crudo** (`express.raw`). Si se parsea a JSON y se vuelve a serializar, puede cambiar el orden de las claves o los espacios, y la firma deja de coincidir.
-2. Rechazar con `400` si `|ahora − t| > 300 s`. La marca de tiempo forma parte de lo firmado, así que no puede alterarse sin invalidar la firma. Esto limita los ataques de repetición (*replay*) a una ventana de 5 minutos.
+2. Rechazar con `400` si la cabecera falta o está mal formada, o si `|ahora − t| > 300 s`. La marca de tiempo forma parte de lo firmado, así que no puede alterarse sin invalidar la firma. Esto limita los ataques de repetición (*replay*) a una ventana de 5 minutos.
 3. Recalcular el HMAC y comparar con `timingSafeEqual`, tras verificar que ambas longitudes coinciden. Una comparación normal (`===`) termina en el primer byte distinto, y su tiempo de respuesta revela cuántos bytes acertó un atacante. Si falla, responder `401`.
-4. Deduplicar por `eventId` y responder `200` también a los duplicados. Si respondiera error, el emisor seguiría reintentando.
+4. Parsear el JSON **después** de verificar la firma. Si no es JSON válido, responder `400`. Sin este control, `JSON.parse` lanza una excepción, Express responde `500` y el notifier lo trataría como reintentable (§ 10), cuando reintentar nunca lo arreglará.
+5. Deduplicar por `eventId` y responder `200` también a los duplicados. Si respondiera error, el emisor seguiría reintentando.
+
+El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pasos 4 y 5: representa un error transitorio del comercio, no un mensaje defectuoso.
 
 **Por qué HMAC:** con un secreto compartido, el comercio comprueba dos cosas: que el mensaje lo envió PagoLab (autenticidad) y que nadie lo alteró en el camino (integridad).
 
@@ -324,7 +327,7 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | `DATABASE_URL` | notifier, ledger | `postgres://…@postgres:5432/pagolab` | Conexión a PostgreSQL |
 | `MERCHANT_WEBHOOK_URL` | notifier | `http://merchant-sim:4100/webhooks/pagolab` | Destino de los webhooks |
 | `WEBHOOK_SECRET` | notifier, merchant-sim | `whsec_local` | Secreto HMAC compartido |
-| `FAIL_RATE` | merchant-sim | `0.2` | Proporción de `500` simulados |
+| `FAIL_RATE` | merchant-sim | `${FAIL_RATE:-0.2}` | Proporción de `500` simulados. Se cambia sin editar Compose: `FAIL_RATE=0 docker compose up -d merchant-sim` |
 
 ### Procedimientos
 
@@ -350,7 +353,7 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | Firma (R16) | Unitaria | Firma determinista con un `now` fijo · el receptor acepta la propia firma |
 | Clasificación de errores (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
 | Ledger (R19) | Integración | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado · saldos = suma de aprobados |
-| Receptor (R17) | Manual (`curl`) | Firma válida `200` · cuerpo alterado `401` · `t` de hace 10 min `400` · duplicado |
+| Receptor (R17) | Manual (`curl` + `openssl` para firmar) | Firma válida `200` · cuerpo alterado `401` · `t` alterado sin volver a firmar `401` · `t` de hace 10 min `400` · sin cabecera `400` · cuerpo no JSON con firma válida `400` · duplicado `200` · `FAIL_RATE` ≈ proporción de `500` |
 | Topología y grupos (R14, R20) | Laboratorio | [`kafka-lab.md`](kafka-lab.md) |
 
 ---
