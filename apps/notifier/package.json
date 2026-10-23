@@ -2,12 +2,14 @@
   "name": "notifier",
   "version": "1.0.0",
   "description": "",
-  "private": "true",
+  "private": true,
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "tsc",
     "start": "node dist/main.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dlt:replay": "node dist/dlt-replay.js",
+    "dlt:replay:dev": "tsx src/dlt-replay.ts"
   },
   "keywords": [],
   "author": "CGR",

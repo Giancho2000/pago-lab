@@ -10,7 +10,24 @@ export interface PaymentEvent {
     data: { id:string };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseEvent(value: Buffer | null): PaymentEvent {
+    let event: any;
+    try {
+        event = JSON.parse(value?.toString() ?? '');
+    } catch {
+        throw new NonRetryableError('el mensaje no es JSON');
+    }
+    if (!UUID.test(event?.eventId ?? '') || typeof event?.data?.id !== 'string') {
+        throw new NonRetryableError('evento sin eventId (uuid) o sin data.id');
+    }
+    return event;
+}
+
+
 export async function deliver(pool: Pool, event: PaymentEvent, cfg: { url: string, secret: string }) {
+
     // 1. ¿Ya lo entregamos? (un rebalanceo o un reinicio pueden traerlo de nuevo)
     const { rowCount } = await pool.query(`SELECT 1 FROM notifier.deliveries WHERE event_id = $1`, [event.eventId]);
     if ( rowCount ) return 'duplicate';

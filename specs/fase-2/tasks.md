@@ -23,6 +23,18 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 | A7 | Git Bash | Para enviar un archivo a un contenedor, usa `docker compose exec -T … < archivo`. Las rutas como `/tmp/x` se traducen a rutas de Windows (`MSYS_NO_PATHCONV=1` lo evita) |
 | A8 | `apps/merchant-sim/src/server.js` (T18) | Envuelve `JSON.parse` en `try/catch` y responde `400`. Sin eso, un cuerpo no JSON con firma válida produce un `500` de Express, que el notifier reintentaría (R17, design § 7) |
 | A9 | `docker-compose.yml` (T18) | Declara `FAIL_RATE: ${FAIL_RATE:-0.2}` en lugar de un valor fijo. Así T18–T20 cambian la tasa sin editar el archivo: `FAIL_RATE=0 docker compose up -d merchant-sim`. Agrega también `init: true`, como en `gateway-sim` |
+| A10 | `apps/notifier/package.json` (T19) | Instala `typescript@~6.0`, como `payments-api`. Sin versión, npm instala TypeScript 7 |
+| A11 | `apps/notifier/tsconfig.json` (T19) | Escríbelo a mano (`nodenext`, `ES2022`, `strict`, `rootDir: src`, `include: ["src"]`, `types: ["node"]`) en lugar de usar `tsc --init`. Así las pruebas de `test/` quedan fuera del build |
+| A12 | `apps/notifier/src/deliver.ts` (T19) | Declara la interfaz `PaymentEvent` con solo los campos que se usan (*tolerant reader*) en lugar de `any` |
+| A13 | `apps/notifier/.dockerignore` (T19) | Excluye `node_modules`, `dist` y `test`. Sin él, `COPY . .` copia el `node_modules` de Windows sobre el de Linux |
+| A14 | `docker-compose.yml` (T19) | `notifier` depende también de `merchant-sim` (`service_started`) |
+| A15 | `apps/notifier/src/deliver.ts` (T20) | `parseEvent` convierte cualquier mensaje inservible (no JSON, `null`, sin `eventId` UUID o sin `data.id`) en `NonRetryableError`. Así la regla es "todo lo que no sea `NonRetryableError` se reintenta", y un JSON válido pero incompleto no consume 3 reintentos inútiles |
+| A16 | `apps/notifier/src/retry.ts` (T20) | `sendToRetryOrDlt` copia las cabeceras originales (`...msg.headers`) antes de escribir las de reintento. La guía las armaba desde cero y perdía `event-id` y `event-type` |
+| A17 | `apps/notifier/src/main.ts` (T20) | Una función `handle()` común entrega o deriva el mensaje en ambos consumidores: una sola regla de clasificación, sin código duplicado |
+| A18 | `apps/notifier/src/main.ts` (T20) | Bandera `stopping` en la espera de `notifier-retry`: ante `SIGTERM` sale sin hacer commit, en lugar de esperar hasta 120 s y terminar con `SIGKILL` |
+| A19 | `apps/notifier/src/main.ts` (T20) | `fromBeginning: true` en `notifier-retry`, para que el grupo, al crearse, no se salte mensajes ya derivados |
+| A20 | `apps/notifier/src/dlt-replay.ts` (T20) | La guía no trae código. Antes de consumir, el script toma una foto de los offsets del DLT (`fetchTopicOffsets`) y de los del grupo (`fetchOffsets`), y termina al alcanzarla. Sin la foto, un consumidor de Kafka nunca sabe que "se acabó" |
+| A21 | Build del notifier | Vitest no verifica tipos. Ejecuta `npm test && npx tsc --noEmit`: si `tsc` falla, el build de Docker también falla y Compose **sigue corriendo la imagen anterior** sin avisar |
 
 ---
 
@@ -102,20 +114,20 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
   - Proyecto `apps/notifier` (TypeScript, ESM) con `signing.ts`, `deliver.ts` y `main.ts`.
   - Dockerfile multi-stage y servicio en Compose sin puertos.
 - **Verificación:**
-  - [ ] Con `FAIL_RATE: "0"`, cada pago aprobado, rechazado o fallido genera un webhook verificado en los logs de `merchant-sim`.
-  - [ ] Reiniciar el notifier no reenvía lo ya entregado.
-  - [ ] Pruebas unitarias de `signWebhook`.
+  - [x] Con `FAIL_RATE: "0"`, cada pago aprobado, rechazado o fallido genera un webhook verificado en los logs de `merchant-sim`.
+  - [x] Reiniciar el notifier no reenvía lo ya entregado.
+  - [x] Pruebas unitarias de `signWebhook`.
 - **Commit:** `feat: notifier con commits manuales y entrega idempotente`
 
 ### T20 · Retry topic con backoff y DLT
 - **Requisitos:** R18
 - **Entregables:** `src/retry.ts`; manejo de errores en el consumidor principal; consumidor `notifier-retry`; script `dlt:replay`.
 - **Verificación:**
-  - [ ] `FAIL_RATE: "0.5"` → todos se entregan, con reintentos visibles en los logs.
-  - [ ] `FAIL_RATE: "1"` → los mensajes terminan en el DLT con `last-error`.
-  - [ ] Mensaje no JSON producido a mano → DLT directo, sin bloquear la partición.
-  - [ ] `dlt:replay` reprocesa el DLT tras volver `FAIL_RATE` a 0.
-  - [ ] Pruebas unitarias de `sendToRetryOrDlt` (backoff, intento 4 → DLT, no reintentable → DLT, clave conservada).
+  - [x] `FAIL_RATE: "0.5"` → todos se entregan, con reintentos visibles en los logs.
+  - [x] `FAIL_RATE: "1"` → los mensajes terminan en el DLT con `last-error`.
+  - [x] Mensaje no JSON producido a mano → DLT directo, sin bloquear la partición.
+  - [x] `dlt:replay` reprocesa el DLT tras volver `FAIL_RATE` a 0.
+  - [x] Pruebas unitarias de `sendToRetryOrDlt` (backoff, intento 4 → DLT, no reintentable → DLT, clave conservada).
 - **Commit:** `feat: retry topic con backoff y dead letter topic`
 
 ### T21 · Ledger con efecto exactamente una vez
