@@ -108,12 +108,15 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 ## R19 · Libro contable (ledger)
 *Ticket T21*
 
-- WHEN el ledger consume un evento `payment.approved`, THE SYSTEM SHALL sumar su monto y una unidad al saldo aprobado del comercio exactamente una vez.
+- WHEN el ledger consume un evento `payment.approved`, THE SYSTEM SHALL sumar su monto y una unidad al saldo aprobado del comercio **en la moneda del pago** exactamente una vez.
+- THE SYSTEM SHALL mantener un saldo separado por cada combinación de comercio y moneda; nunca sumará montos de monedas distintas.
 - THE SYSTEM SHALL registrar el `eventId` procesado y el efecto sobre el saldo en la misma transacción.
 - IF el evento ya fue procesado, THEN THE SYSTEM SHALL ignorarlo sin modificar los saldos.
 - THE SYSTEM SHALL ignorar los tipos de evento distintos de `payment.approved`.
-- THE SYSTEM SHALL mantener, para cada comercio, un saldo aprobado igual a la suma de los montos de sus pagos `APPROVED`.
-- WHEN se reinician los offsets del grupo `ledger` al inicio del topic sobre tablas vacías, THE SYSTEM SHALL reconstruir los mismos saldos.
+- THE SYSTEM SHALL mantener, para cada comercio y moneda, un saldo aprobado igual a la suma de los montos de sus pagos `APPROVED` que generaron un evento `payment.approved`. Los pagos anteriores al outbox (T16), como los del seed de la Fase 1, nunca se publicaron y quedan fuera del ledger.
+- IF un mensaje de `payments.events` no es un evento válido (no es JSON, no tiene `eventId` UUID o es un `payment.approved` sin `merchantId`, `amountCents` entero positivo o `currency`), THEN THE SYSTEM SHALL registrarlo con nivel de error y continuar con el siguiente.
+- IF falla la base de datos del ledger, THEN THE SYSTEM SHALL dejar de avanzar sin confirmar el offset y reintentar el mismo mensaje hasta que la base de datos vuelva.
+- WHEN se reinician los offsets del grupo `ledger` al inicio del topic sobre tablas vacías, THE SYSTEM SHALL reconstruir los mismos saldos para los eventos que sigan dentro de la retención del topic (7 días).
 
 ## R20 · Independencia de los consumidores
 *Tickets T19–T21*
@@ -158,7 +161,7 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 | R16 | T19 | Pruebas unitarias de firma y entrega, y logs de `merchant-sim` |
 | R17 | T18 | Pruebas manuales con `curl` (`200`/`400`/`401`/duplicado) |
 | R18 | T20 | Pruebas unitarias y prueba manual con `FAIL_RATE` |
-| R19 | T21 | Prueba de integración y consulta comparativa de saldos |
-| R20 | T19–T22 | Laboratorio de consumer groups (`kafka-lab.md`) |
+| R19 | T21 | Prueba de integración (Testcontainers) y consulta de diferencias entre saldos y pagos aprobados con evento |
+| R20 | T19–T22 | Laboratorio de consumer groups (`kafka-lab.md`, archivo local no versionado) |
 | R21 | T17–T21 | `docker compose stop` y revisión de logs |
 | R22 | Todos | `npm run test:cov` |

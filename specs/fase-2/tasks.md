@@ -34,6 +34,10 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 | A18 | `apps/notifier/src/main.ts` (T20) | Bandera `stopping` en la espera de `notifier-retry`: ante `SIGTERM` sale sin hacer commit, en lugar de esperar hasta 120 s y terminar con `SIGKILL` |
 | A19 | `apps/notifier/src/main.ts` (T20) | `fromBeginning: true` en `notifier-retry`, para que el grupo, al crearse, no se salte mensajes ya derivados |
 | A20 | `apps/notifier/src/dlt-replay.ts` (T20) | La guía no trae código. Antes de consumir, el script toma una foto de los offsets del DLT (`fetchTopicOffsets`) y de los del grupo (`fetchOffsets`), y termina al alcanzarla. Sin la foto, un consumidor de Kafka nunca sabe que "se acabó" |
+| A22 | Migración `create_ledger_schema` (T21) | `merchant_balances` con PK `(merchant_id, currency)`, `approved_cents bigint` y `CHECK ≥ 0`. La guía sumaba COP y USD en una sola cifra |
+| A23 | `apps/ledger/src/main.ts` (T21) | `parseEvent` + `InvalidEventError`: un mensaje inválido se registra y se salta. Sin esto, el mensaje venenoso de T20 bloquea el ledger en su primer arranque. Un error de base de datos se relanza para no saltarse pagos reales |
+| A24 | Verificación de T21 | El seed de T12 tiene unos 250 000 pagos aprobados sin evento: se comparan solo los que tienen `payment.approved` en el outbox, con una consulta de diferencias (`FULL JOIN` + `IS DISTINCT FROM`) |
+| A25 | `specs/fase-2/kafka-lab.md`, `sqs-lab.md` | Son plantillas de laboratorio locales: se excluyen en `.git/info/exclude` y no se versionan |
 | A21 | Build del notifier | Vitest no verifica tipos. Ejecuta `npm test && npx tsc --noEmit`: si `tsc` falla, el build de Docker también falla y Compose **sigue corriendo la imagen anterior** sin avisar |
 
 ---
@@ -132,23 +136,37 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 
 ### T21 · Ledger con efecto exactamente una vez
 - **Requisitos:** R19, R20
-- **Entregables:** migración del schema `ledger`; servicio `apps/ledger` (o un segundo punto de entrada en `apps/notifier`; decide y anota la elección en `design.md`); servicio en Compose.
+- **Entregables:** migración `create_ledger_schema`; servicio `apps/ledger` (decisión D12 en `design.md`); servicio en Compose. Ajustes A22–A24.
 - **Verificación:**
-  - [ ] Esta consulta coincide con `ledger.merchant_balances`:
+  - [x] La consulta de diferencias devuelve `0 rows`. Compara solo los pagos aprobados **con evento**: los del seed de la Fase 1 nunca se publicaron (A24).
     ```sql
-    SELECT merchant_id, sum(amount_cents), count(*) FROM payments WHERE status = 'APPROVED' GROUP BY 1
+    WITH esperado AS (
+      SELECT p.merchant_id, p.currency, sum(p.amount_cents) AS cents, count(*) AS n
+        FROM payments p
+       WHERE p.status = 'APPROVED'
+         AND EXISTS (SELECT 1 FROM outbox o
+                      WHERE o.aggregate_id = p.id AND o.event_type = 'payment.approved')
+       GROUP BY 1, 2
+    )
+    SELECT merchant_id, currency, e.cents, b.approved_cents, e.n, b.approved_count
+      FROM esperado e
+      FULL JOIN ledger.merchant_balances b USING (merchant_id, currency)
+     WHERE e.cents IS DISTINCT FROM b.approved_cents
+        OR e.n     IS DISTINCT FROM b.approved_count;
     ```
-  - [ ] Pruebas de `apply`: aplica una vez, ignora duplicados e ignora otros tipos.
+  - [x] Tras vaciar las tablas y reiniciar los offsets del grupo `ledger` al inicio, la consulta sigue en `0 rows`.
+  - [x] Con el notifier detenido, el ledger sigue aplicando pagos nuevos (R20).
+  - [x] Pruebas de `apply`: aplica una vez, ignora duplicados, ignora otros tipos, concurrencia y todo o nada.
 - **Commit:** `feat: consumidor ledger con efecto exactamente una vez en base de datos`
 
 ### T22 · Laboratorio de consumer groups
 - **Requisitos:** R20 (evidencia)
-- **Entregables:** [`kafka-lab.md`](kafka-lab.md) completo con los 9 experimentos y capturas.
+- **Entregables:** `kafka-lab.md` (local, no versionado, A25) completo con los 9 experimentos y capturas.
 - **Commit:** `docs: laboratorio de consumer groups, rebalanceo, lag y replay`
 
 ### T23 · Laboratorio SQS con ElasticMQ
 - **Requisitos:** — (comparativa conceptual)
-- **Entregables:** `infra/elasticmq/elasticmq.conf`, servicio con perfil `sqs`, `labs/sqs/lab.ts` y [`sqs-lab.md`](sqs-lab.md) completo.
+- **Entregables:** `infra/elasticmq/elasticmq.conf`, servicio con perfil `sqs`, `labs/sqs/lab.ts` y `sqs-lab.md` (local, no versionado, A25) completo.
 - **Commit:** `docs: laboratorio sqs con elasticmq y comparacion con kafka`
 
 ### T24 · Cierre de la fase
