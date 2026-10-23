@@ -118,7 +118,17 @@ flowchart LR
 | Tabla | Columnas | Motivo |
 |---|---|---|
 | `ledger.processed_events` | `event_id uuid PK`, `processed_at` | Marca de procesado. Su PK hace atómica la deduplicación |
-| `ledger.merchant_balances` | `merchant_id PK`, `approved_cents bigint`, `approved_count int` | Saldo acumulado. Se actualiza con `INSERT … ON CONFLICT DO UPDATE` |
+| `ledger.merchant_balances` | `merchant_id text`, `currency text`, `approved_cents bigint CHECK ≥ 0`, `approved_count int CHECK ≥ 0`; PK `(merchant_id, currency)` | Saldo acumulado por comercio **y moneda**: sumar centavos de COP con centavos de USD daría un número sin significado. Se actualiza con `INSERT … ON CONFLICT DO UPDATE`, y la suma ocurre en PostgreSQL para evitar *lost updates*. `bigint` porque 3 pagos del máximo permitido (10⁹ centavos) ya desbordan un `int` |
+
+**Implementación del ledger (T21)** · `apps/ledger/src/apply.ts`
+
+| Aspecto | Decisión | Por qué |
+|---|---|---|
+| Exactamente una vez | `INSERT INTO processed_events … ON CONFLICT DO NOTHING RETURNING 1` y el *upsert* del saldo en la misma transacción, en una conexión dedicada (`pool.connect()`) | La marca y el efecto se confirman juntos. Si el proceso muere antes del `COMMIT` no queda nada; si muere después, el reproceso ve la marca y devuelve `duplicate` |
+| Concurrencia | La PK de `processed_events` | Si dos réplicas procesan el mismo evento durante un rebalanceo, el segundo `INSERT` espera el bloqueo del primero y, tras su `COMMIT`, cae en `DO NOTHING` |
+| Otros tipos | `ignored` sin registrar nada | No hay efecto que proteger; `processed_events` no crece con eventos irrelevantes |
+| Mensaje inválido | `parseEvent` lanza `InvalidEventError`; se registra con nivel `error` y se confirma el offset | Un mensaje ilegible nunca será válido y no puede representar un pago aprobado legible. Bloquear la partición por él detendría el ledger para siempre |
+| Base de datos caída | El error se relanza: sin commit, kafkajs reintenta el mismo mensaje | La dependencia es propia: todos los mensajes fallarían igual, y saltarse un `payment.approved` dejaría saldos incorrectos. Estar atrasado es aceptable; estar equivocado, no |
 
 **Un schema por servicio:** cada consumidor es dueño de sus datos y no lee tablas ajenas. Comparten instancia de PostgreSQL solo por economía del laboratorio; separarlos en bases distintas no requeriría cambios de código.
 
@@ -352,9 +362,9 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 | Relay (R15) | Integración (Postgres de Testcontainers + productor falso) · unitaria del ciclo | Clave = id del pago, cabeceras y orden de creación; no repite lo publicado · si `send` falla no marca nada y el reintento reenvía el mismo lote · dos lotes concurrentes no duplican (`SKIP LOCKED`) · la limpieza borra solo lo publicado hace más de 7 días · `tick` vacía el backlog y sobrevive a un error |
 | Firma (R16) | Unitaria | Firma determinista con un `now` fijo · el receptor acepta la propia firma |
 | Clasificación de errores (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
-| Ledger (R19) | Integración | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado · saldos = suma de aprobados |
+| Ledger (R19) | Integración (Postgres de Testcontainers con la migración real) | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado sin marca · saldos = suma de aprobados por comercio y moneda · dos aplicaciones simultáneas del mismo evento → solo una aplica · fallo en el saldo → la marca también se revierte · `parseEvent` rechaza lo no JSON y los aprobados sin monto válido |
 | Receptor (R17) | Manual (`curl` + `openssl` para firmar) | Firma válida `200` · cuerpo alterado `401` · `t` alterado sin volver a firmar `401` · `t` de hace 10 min `400` · sin cabecera `400` · cuerpo no JSON con firma válida `400` · duplicado `200` · `FAIL_RATE` ≈ proporción de `500` |
-| Topología y grupos (R14, R20) | Laboratorio | [`kafka-lab.md`](kafka-lab.md) |
+| Topología y grupos (R14, R20) | Laboratorio | `kafka-lab.md` (archivo local, no versionado) |
 
 ---
 
@@ -373,6 +383,9 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 | D9 | **Schema por servicio en una sola instancia** | Una base por servicio | Aislamiento lógico con costo cero en el laboratorio. Migrar a bases separadas no cambia el código |
 | D10 | **Eventos con estado completo** | Solo el id (*notificación*) | Los consumidores no dependen de que `payments-api` esté disponible |
 | D11 | **Limpieza del outbox con `@Cron` diario dentro del relay** | `@Interval(24 h)` · particionar `outbox` por fecha · retención en un job externo | El contador de `@Interval` se reinicia en cada despliegue: con más de un despliegue al día no se ejecutaría nunca. El `DELETE` diario basta para el volumen del laboratorio; con mucho volumen, particionar por día y hacer `DROP PARTITION` evita el costo del `DELETE` |
+| D12 | **Ledger como servicio aparte (`apps/ledger`)** | Segundo punto de entrada dentro de `apps/notifier` | Aísla los fallos (un error de build o un crash del ledger no afecta al notifier, R20), permite escalar cada uno por separado (T22) y mantiene dependencias mínimas. El costo es repetir `Dockerfile`, `tsconfig.json` y `package.json` |
+| D13 | **Saldo por comercio y moneda** | Saldo solo por comercio | Los pagos pueden ser en COP o USD; sumarlos en una sola cifra no tiene significado contable |
+| D14 | **Mensajes inválidos en el ledger: registrar y saltar** | DLT propio (`ledger.dlt`) · bloquear la partición | Un mensaje ilegible no puede ser un pago aprobado legible, así que saltarlo no altera saldos. Un DLT propio sería más robusto para auditoría, pero agrega un topic y un proceso de reproceso que el laboratorio no necesita |
 
 ---
 
@@ -383,3 +396,7 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 - **`merchant-sim` deduplica en memoria:** pierde su registro al reiniciarse; un receptor real lo persistiría.
 - **Relay sin alta disponibilidad:** si su única instancia cae, los eventos esperan en el outbox hasta que vuelva. No se pierden, pero se retrasan. Esto se mejorará con *leader election* en Kubernetes.
 - **Broker único:** sin tolerancia a fallos de Kafka (`replication.factor = 1`).
+- **El ledger solo conoce lo publicado:** los pagos anteriores al outbox (T16), incluido el seed de un millón de pagos de la Fase 1, nunca generaron eventos y no forman parte de los saldos.
+- **Reconstrucción limitada a la retención:** reiniciar los offsets del grupo `ledger` reconstruye solo lo que siga en `payments.events` (7 días). Una reconstrucción completa requeriría *snapshots* periódicos de los saldos o un topic compactado.
+- **`ledger.processed_events` crece sin límite:** podría purgarse lo que sea más antiguo que la retención del topic, porque ningún duplicado puede llegar después.
+- **Mensajes inválidos del ledger solo en el log:** no hay un DLT propio para auditarlos o reprocesarlos (D14).

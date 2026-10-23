@@ -132,6 +132,18 @@ services:
       merchant-sim:
         condition: service_started
 
+  ledger:
+    build: ./apps/ledger
+    environment:
+      DATABASE_URL: postgres://pagolab:pagolab@postgres:5432/pagolab
+      KAFKA_BROKERS: kafka:9092
+    init: true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+        
 volumes:
   pgdata:
   kafkadata:

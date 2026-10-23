@@ -1,0 +1,29 @@
+{
+  "name": "ledger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "",
+  "scripts": {
+      "dev": "tsx watch src/main.ts",
+      "build": "tsc",
+      "start": "node dist/main.js",
+      "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "CGR",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^12.2.1",
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0",
+    "vitest": "^5.0.5"
+  }
+}

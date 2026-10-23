@@ -4,7 +4,11 @@
 
 El proyecto sigue un enfoque **Spec-Driven Development (SDD)**: primero se escriben los requisitos (EARS) y los contratos (OpenAPI para la API, AsyncAPI para los eventos), y después el código. Cada ticket es una rama y un *pull request* con su propio historial.
 
-**Estado actual:** la Fase 1 (núcleo de pagos) está completa. La Fase 2 (eventos con Kafka) va por **T20**: cada cambio de estado de un pago se publica en Kafka mediante un *transactional outbox*, y un servicio `notifier` lo entrega al comercio como webhook firmado con HMAC. Si la entrega falla, se reintenta con *backoff* (5 s, 30 s, 120 s) en un topic aparte, y lo que no se puede entregar termina en un *dead letter topic* que se puede reprocesar. El ledger (T21) es el siguiente paso.
+**Estado actual:** la Fase 1 (núcleo de pagos) está completa. La Fase 2 (eventos con Kafka) va por **T21**: cada cambio de estado de un pago se publica en Kafka mediante un *transactional outbox*. Dos consumidores independientes leen esos eventos:
+- **`notifier`** los entrega al comercio como webhook firmado con HMAC. Si la entrega falla, la reintenta con *backoff* (5 s, 30 s, 120 s) en un topic aparte, y lo que no se puede entregar termina en un *dead letter topic* que se puede reprocesar.
+- **`ledger`** lleva los saldos aprobados por comercio y moneda con **efecto exactamente una vez**.
+
+Los laboratorios de consumer groups (T22) y de SQS (T23) son los siguientes pasos.
 
 
 ---
@@ -43,6 +47,8 @@ El proyecto sigue un enfoque **Spec-Driven Development (SDD)**: primero se escri
 | **Webhooks firmados** | El comercio recibe cada evento con la cabecera `PagoLab-Signature: t=…,v1=HMAC-SHA256`. El receptor verifica sobre el cuerpo crudo, compara en tiempo constante, rechaza firmas de más de 5 minutos (*replay*) y deduplica por `eventId`. |
 | **Consumidor idempotente** | El `notifier` confirma el offset de Kafka a mano y solo después de entregar (*at-least-once*). Registra cada entrega en su propio schema, así que un reinicio o un rebalanceo no reenvía lo ya entregado. |
 | **Reintentos sin bloqueo y DLT** | Un webhook fallido no detiene la partición: se deriva a un *retry topic* con *backoff* de 5 s, 30 s y 120 s, o directo al DLT si el error no tiene arreglo (`400`/`401`, mensaje corrupto). El DLT conserva la causa en `last-error` y se reprocesa con `npm run dlt:replay`. |
+| **Efecto exactamente una vez** | El `ledger` registra el `eventId` y suma el saldo **en la misma transacción**: un evento repetido (rebalanceo, replay) nunca suma dos veces, y dos réplicas que procesan el mismo evento a la vez se ordenan por el bloqueo de la PK. Vaciando sus tablas y rebobinando los offsets del grupo, reconstruye los mismos saldos desde Kafka. |
+| **Consumidores independientes** | `notifier` y `ledger` leen el mismo topic con consumer groups distintos: cada uno avanza a su ritmo, y si uno se detiene el otro sigue. Cada servicio es dueño de su propio schema de base de datos. |
 | **Paginación eficiente** | Paginación por cursor (*keyset*) sobre `(created_at, id)` con un índice compuesto. El tiempo de respuesta no se degrada al avanzar páginas. |
 | **Operación** | Endpoints `/health/live` y `/health/ready`, apagado ordenado ante `SIGTERM` (deja de estar listo, termina las peticiones en curso y cierra el pool) y errores en formato **RFC 9457** (`application/problem+json`). |
 | **Pruebas de verdad** | Pruebas de integración contra un PostgreSQL real con **Testcontainers** y una pasarela falsa determinista. Incluyen escenarios de concurrencia. |
@@ -77,9 +83,11 @@ flowchart LR
   RT -->|"group: notifier-retry<br/>espera not-before"| N
   N -->|"400 / 401 / no JSON<br/>o 4.º fallo"| DLT[[payments.events.dlt]]
   DLT -.->|"npm run dlt:replay"| K
+  K -->|"group: ledger"| L[ledger]
+  L -->|"marca + saldo<br/>misma transacción"| LB[(ledger.processed_events<br/>ledger.merchant_balances)]
 ```
 
-El diseño completo de la Fase 2, incluido el ledger que falta, está en [`specs/fase-2/design.md`](specs/fase-2/design.md).
+El diseño completo de la Fase 2 está en [`specs/fase-2/design.md`](specs/fase-2/design.md).
 
 ### Máquina de estados del pago
 
@@ -108,7 +116,8 @@ stateDiagram-v2
 | `kafka-init` | Crea los topics (`infra/kafka/create-topics.sh`) y termina | — |
 | `kafka-ui` | Interfaz web para inspeccionar topics, mensajes y consumer groups | `8081` |
 | `merchant-sim` | Comercio simulado (Express) que verifica las firmas HMAC; `FAIL_RATE` simula fallos | `4100` |
-| `notifier` | Consume `payments.events` y entrega los webhooks al comercio | — (sin puerto, para poder escalarlo) |
+| `notifier` | Consume `payments.events` y entrega los webhooks al comercio, con reintentos y DLT | — (sin puerto, para poder escalarlo) |
+| `ledger` | Consume `payments.events` y mantiene los saldos aprobados por comercio y moneda | — (sin puerto, para poder escalarlo) |
 
 ---
 
@@ -148,9 +157,13 @@ pagos-lab/
 │   ├── gateway-sim/             # Pasarela de pagos simulada
 │   ├── merchant-sim/            # Comercio simulado que verifica webhooks
 │   │   └── scripts/check-webhook.sh   # Verificación manual de firmas con curl + openssl
-│   └── notifier/                # Consumidor de Kafka que entrega webhooks
-│       ├── src/                 # main.ts (consumidor), deliver.ts, signing.ts
-│       └── test/                # Pruebas unitarias de la firma
+│   ├── notifier/                # Consumidor de Kafka que entrega webhooks
+│   │   ├── src/                 # main.ts (consumidores), deliver.ts, signing.ts,
+│   │   │                        # retry.ts (retry/DLT) y dlt-replay.ts
+│   │   └── test/                # Pruebas unitarias de la firma y del retry/DLT
+│   └── ledger/                  # Consumidor de Kafka que lleva los saldos
+│       ├── src/                 # main.ts (consumidor) y apply.ts (exactamente una vez)
+│       └── test/                # Pruebas de integración contra PostgreSQL real
 ├── db/
 │   ├── migrations/              # Migraciones de dbmate
 │   └── seed/seed_1m.sql         # 1.000.000 de pagos para el laboratorio de EXPLAIN
@@ -343,8 +356,30 @@ Cada vez que un pago llega a un estado de interés para el comercio, se genera u
 | Cambio de estado → outbox | Atómica | No queda ni el cambio ni el evento |
 | Outbox → Kafka | Al menos una vez | El lote se publica de nuevo con los mismos `eventId` |
 | Kafka → notifier → comercio | Al menos una vez | El webhook se reenvía y el comercio lo deduplica por `eventId` |
+| Kafka → ledger | **Efecto exactamente una vez** | Si muere antes del `COMMIT`, no queda nada; si muere después, el reproceso encuentra la marca y no vuelve a sumar |
 
-Un webhook HTTP **no puede** ser *exactly-once*: siempre existe una ventana entre "el comercio recibió" y "registré que recibió". Por eso la última barrera es la deduplicación en el receptor.
+**La diferencia clave:** un webhook HTTP **no puede** ser *exactly-once*, porque siempre existe una ventana entre "el comercio recibió" y "registré que recibió", y la última barrera es la deduplicación en el receptor. En el ledger, el efecto (el saldo) y la marca de procesado viven en la **misma base de datos**, así que una transacción los confirma juntos.
+
+### Ledger
+
+```bash
+docker compose logs -f ledger      # "applied", "ignored" (otros tipos), "duplicate", "invalid"
+docker compose exec postgres psql -U pagolab -d pagolab -c "SELECT * FROM ledger.merchant_balances;"
+```
+
+Para comprobar que los saldos coinciden con los pagos aprobados, usa la consulta de diferencias de [`specs/fase-2/tasks.md`](specs/fase-2/tasks.md) (T21): debe devolver `0 rows`.
+
+**Reconstruir los saldos desde Kafka:**
+
+```bash
+docker compose stop ledger         # Kafka no permite mover offsets de un grupo con miembros activos
+docker compose exec postgres psql -U pagolab -d pagolab \
+  -c "TRUNCATE ledger.processed_events, ledger.merchant_balances;"
+MSYS_NO_PATHCONV=1 docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --group ledger \
+  --reset-offsets --to-earliest --topic payments.events --execute
+docker compose start ledger        # relee el topic y reconstruye los mismos saldos
+```
 
 ### Verlo funcionando
 
@@ -414,11 +449,12 @@ Desde `apps/payments-api`:
 
 El reporte HTML queda en `apps/payments-api/coverage/index.html`.
 
-Desde `apps/notifier`, `npm test` ejecuta las pruebas unitarias. Vitest no verifica tipos, así que conviene acompañarlo de `npx tsc --noEmit`, que es el mismo chequeo que corre el build de Docker.
+Desde `apps/notifier` y `apps/ledger`, `npm test` ejecuta las pruebas de cada servicio; las del ledger necesitan Docker (Testcontainers). Vitest no verifica tipos, así que conviene acompañarlo de `npx tsc --noEmit`, que es el mismo chequeo que corre el build de Docker.
 
 **Estado actual:**
 - `payments-api`: 107 pruebas en verde · **96,7 %** de cobertura de líneas.
 - `notifier`: 9 pruebas unitarias (firma de webhooks y decisión entre reintento y DLT).
+- `ledger`: 7 pruebas (integración de `apply` contra PostgreSQL y validación de eventos).
 
 ### Estrategia
 
@@ -426,6 +462,7 @@ Desde `apps/notifier`, `npm test` ejecuta las pruebas unitarias. Vitest no verif
 - **Unitarias del notifier:**
   - la firma usa segundos, firma exactamente `"<t>.<cuerpo>"` como verifica el receptor y cambia si cambia un byte del cuerpo o el secreto;
   - `sendToRetryOrDlt` aplica el *backoff* correcto en cada intento, manda al DLT el 4.º fallo y los errores no reintentables, y conserva la clave, el cuerpo y las cabeceras originales.
+- **Integración del ledger:** contra un PostgreSQL efímero con la migración real. Verifican que un evento repetido aplica una sola vez, que los saldos se separan por comercio y moneda, que los otros tipos se ignoran sin dejar marca, que **dos aplicaciones simultáneas del mismo evento** solo suman una vez y que, si falla la actualización del saldo, **la marca también se revierte** (todo o nada).
 - **Integración (e2e):** la aplicación completa contra un PostgreSQL efímero, con las migraciones reales, una pasarela falsa determinista y un productor de Kafka falso. Las pruebas están organizadas por requisito e incluyen:
   - recuperación de claves huérfanas, con y sin pago creado (T14);
   - evento en el outbox en la misma transacción que el cambio de estado, y relay que solo marca como publicado si Kafka confirmó (T16–T17);
@@ -487,13 +524,17 @@ CREATE INDEX CONCURRENTLY idx_payments_merchant_created
 - **Llamada a la pasarela fuera de transacciones:** el resolver reclama un lote en una transacción muy corta y consulta la pasarela sin bloqueos abiertos.
 - **Outbox en lugar de publicar directo a Kafka:** escribir en la base de datos y en Kafka por separado deja una ventana en la que una de las dos operaciones puede fallar. El outbox convierte el problema en una sola transacción local más una publicación que se puede repetir.
 - **Evento con estado (*event-carried state*):** el evento lleva los datos del pago, así que el comercio no necesita consultar la API para saber qué pasó.
-- **Un schema por consumidor:** `notifier` es dueño de `notifier.*` y no lee tablas de otros servicios. Comparten instancia de PostgreSQL solo por economía del laboratorio.
+- **Un schema por consumidor:** `notifier` es dueño de `notifier.*` y `ledger` de `ledger.*`; ninguno lee tablas de otros servicios. Comparten instancia de PostgreSQL solo por economía del laboratorio.
+- **Ledger como servicio aparte:** en lugar de un segundo punto de entrada dentro del notifier, para aislar fallos y escalar cada uno por separado.
+- **Fallos distintos, tratamientos distintos:** si el comercio falla, el notifier aparta el mensaje (retry/DLT) y sigue con los demás. Si la base de datos del ledger falla, el ledger **se detiene** y reintenta: saltarse un pago aprobado dejaría un saldo incorrecto. Un mensaje ilegible, en cambio, se registra y se salta, porque nunca podrá procesarse.
 
 ### Limitaciones conocidas
 
 - **Los reintentos rompen el orden por pago:** si el webhook de `payment.unknown` entra a reintento, el de `payment.approved` del mismo pago puede llegar antes. El comercio debe usar `occurredAt` para ignorar eventos más antiguos que el último que procesó.
 - **Un solo topic de reintento:** un mensaje que espera 120 s retrasa a los que esperan 5 s detrás de él en la misma partición. La alternativa es un topic por nivel de espera (`retry-5s`, `retry-30s`, `retry-2m`).
 - **Un mensaje venenoso vuelve al DLT en cada replay:** `dlt:replay` reenvía todo lo pendiente. Un mensaje que nunca podrá procesarse debe analizarse y descartarse, no reprocesarse.
+- **El ledger solo conoce lo publicado:** los pagos anteriores al outbox (T16), incluido el seed de un millón de pagos, nunca generaron eventos y no forman parte de los saldos.
+- **Reconstrucción limitada a la retención:** rebobinar el grupo `ledger` solo recupera lo que siga en Kafka (7 días). Para más, harían falta *snapshots* de los saldos.
 - **Relay en una sola instancia:** con dos relays activos, los eventos de un mismo pago podrían publicarse fuera de orden.
 - **Deduplicación del comercio en memoria:** `merchant-sim` olvida los `eventId` recibidos al reiniciarse.
 - **Autenticación temporal:** `X-Merchant-Id` simula la identidad del comercio sin verificarla. *Se reemplaza por OAuth2/JWT en la Fase 3.*
@@ -606,7 +647,7 @@ La Fase 2 está en curso:
 | T18 | Comercio simulado con verificación HMAC de webhooks | ✅ |
 | T19 | Notifier con commits manuales y entrega idempotente | ✅ |
 | T20 | Retry topic con backoff y DLT | ✅ |
-| T21 | Ledger con efecto exactamente una vez | Pendiente |
+| T21 | Ledger con efecto exactamente una vez | ✅ |
 | T22 | Laboratorio de consumer groups | Pendiente |
 | T23 | Laboratorio SQS con ElasticMQ | Pendiente |
 | T24 | Cierre de la fase | Pendiente |
@@ -636,4 +677,3 @@ La Fase 2 está en curso:
 - [`specs/fase-2/design.md`](specs/fase-2/design.md): diseño de eventos, outbox, webhooks, reintentos y ledger
 - [`specs/fase-2/asyncapi.yaml`](specs/fase-2/asyncapi.yaml): contrato de los eventos
 - [`specs/fase-2/tasks.md`](specs/fase-2/tasks.md): plan de implementación por ticket
-- [`specs/fase-2/kafka-lab.md`](specs/fase-2/kafka-lab.md) y [`specs/fase-2/sqs-lab.md`](specs/fase-2/sqs-lab.md): laboratorios de Kafka y SQS
