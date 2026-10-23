@@ -1,114 +1,92 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# payments-api
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API de pagos de **PagoLab** (NestJS 12 · TypeScript 6 · ESM). Recibe pagos con idempotencia, los cobra en la pasarela simulada, resuelve los pagos con resultado incierto (`UNKNOWN`) y publica cada cambio de estado en Kafka mediante un *transactional outbox*.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+La visión general del proyecto, la arquitectura completa y el guion de demostración están en el [README principal](../../README.md).
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Responsabilidades
 
-## Project setup
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| `PaymentsController` | `src/payments/` | `POST /payments`, `GET /payments/{id}` y `GET /payments` (paginación por cursor) |
+| `IdempotencyService` | `src/payments/` | Reclamo atómico de `Idempotency-Key`, *replay* de la respuesta original, `409`/`422` y recuperación de claves huérfanas |
+| `PaymentsService` · `PaymentsRepository` | `src/payments/` | Flujo de cobro con timeout y transiciones condicionales (`UPDATE … WHERE status = $from`). Cada transición escribe la auditoría (`payment_events`) y el evento (`outbox`) en la misma transacción |
+| `GatewayClient` | `src/payments/` | Cliente HTTP de `gateway-sim` con timeout (`GATEWAY_TIMEOUT_MS`) |
+| `UnknownPaymentsResolver` | `src/payments/` | Cada 10 s consulta a la pasarela los pagos `UNKNOWN` y los `PROCESSING` atascados (`FOR UPDATE SKIP LOCKED` + *lease*) |
+| Dominio | `src/payments/domain/` | Máquina de estados (`payment-status.ts`) y construcción de eventos (`payment-events.ts`) |
+| `OutboxRelay` | `src/messaging/` | Cada 1 s publica el outbox en `payments.events` (`key = paymentId`, `acks=all`) y purga a diario lo publicado hace más de 7 días |
+| `KafkaModule` | `src/messaging/` | Productor idempotente de Kafka; se desconecta al apagar la aplicación |
+| Health | `src/health/` | `/health/live` y `/health/ready` |
+| Comunes | `src/common/` | Errores RFC 9457, helper de transacciones y decorador `X-Merchant-Id` |
 
-```bash
-$ npm install
-```
+El contrato HTTP es [`docs/openapi.yaml`](docs/openapi.yaml), servido con Swagger UI en `/docs`. El contrato de los eventos es [`specs/fase-2/asyncapi.yaml`](../../specs/fase-2/asyncapi.yaml).
 
-## Compile and run the project
+---
+
+## Ejecutar
+
+### Con Docker Compose (recomendado)
+
+Desde la raíz del repositorio:
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+docker compose up -d --build payments-api
 ```
 
-## Run tests
+Compose levanta también lo que la API necesita: PostgreSQL, las migraciones, `gateway-sim` y Kafka con sus topics.
+
+### En local (desarrollo)
 
 ```bash
-# unit tests
-$ npm run test
+# Desde la raíz: dependencias en Docker
+docker compose up -d postgres migrate gateway-sim kafka kafka-init
 
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+# Desde apps/payments-api
+cp .env.example .env      # ajusta los valores (ver tabla)
+npm install
+npm run start:dev
 ```
 
-## Deployment
+| Variable | Descripción | Valor local |
+|---|---|---|
+| `PORT` | Puerto HTTP | `3000` |
+| `DATABASE_URL` | Conexión a PostgreSQL | `postgres://pagolab:pagolab@localhost:5433/pagolab` |
+| `GATEWAY_URL` | URL de la pasarela | `http://localhost:4000` |
+| `GATEWAY_TIMEOUT_MS` | Tiempo máximo de espera a la pasarela | `2000` |
+| `RESOLVER_ENABLED` | Activa el resolver de pagos `UNKNOWN` | `true` |
+| `KAFKA_BROKERS` | Brokers de Kafka | `localhost:29092` (en Compose: `kafka:9092`) |
+| `RELAY_ENABLED` | Activa el relay del outbox. Solo **una** instancia debe tenerlo activo, para conservar el orden de los eventos | `true` |
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+Si ejecutas la API en local mientras el contenedor `payments-api` sigue corriendo, deja `RELAY_ENABLED=false` en una de las dos.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+---
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+## Scripts
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+| Comando | Qué hace | Requiere Docker |
+|---|---|---|
+| `npm run start:dev` | API en modo *watch* | Sí (dependencias) |
+| `npm run build` | Compila a `dist/` | No |
+| `npm test` | Pruebas unitarias (proyecto `unit`) | No |
+| `npm run test:e2e` | Integración contra PostgreSQL real con Testcontainers (proyecto `e2e`) | Sí |
+| `npm run test:cov` | Ambas suites con cobertura y umbral mínimo del 85 % de líneas | Sí |
+| `npm run lint` | oxlint sobre `src/` y `test/` | No |
+| `npm run format` | Prettier sobre `src/` y `test/` | No |
 
-## Observability
+**Estado:** 107 pruebas en verde · 96,7 % de cobertura de líneas. El reporte HTML queda en `coverage/index.html`.
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+### Cómo están armadas las pruebas
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+- **Unitarias** (`src/**/*.spec.ts`): máquina de estados, construcción de eventos, cliente de la pasarela, resolver, relay y transacciones.
+- **Integración** (`test/*.e2e-spec.ts`, `test/*.int-spec.ts`): la aplicación completa contra un PostgreSQL efímero.
+  - `test/support/global-setup.ts` levanta el contenedor una vez por ejecución y le aplica **todas** las migraciones reales de `db/migrations`.
+  - `test/support/fake-gateway.ts` es una pasarela falsa determinista.
+  - `test/support/app.ts` reemplaza el productor de Kafka por uno falso, así que las pruebas no necesitan Kafka. El relay se prueba verificando las llamadas a `send`.
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+---
 
-## Resources
+## Imagen Docker
 
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+El `Dockerfile` es *multi-stage*: `deps` (instala dependencias) → `build` (compila y ejecuta `npm prune --omit=dev`) → `runtime` (`node:22-alpine` con usuario `node` y *healthcheck* sobre `/health/live`). Pesa unos 375 MB, frente a 2,21 GB de la versión de una sola etapa.
