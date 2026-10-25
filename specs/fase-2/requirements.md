@@ -138,7 +138,7 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 
 - THE SYSTEM SHALL mantener en `payments-api` una cobertura de pruebas ≥ 85 % de líneas.
 - THE SYSTEM SHALL cubrir con pruebas de integración contra PostgreSQL real los requisitos R11 y R12.
-- THE SYSTEM SHALL cubrir con pruebas unitarias la firma de webhooks (R16) y la decisión entre reintento y DLT (R18), y con pruebas de integración la aplicación idempotente del ledger (R19). La clasificación de las respuestas HTTP en `deliver` se verifica manualmente con `FAIL_RATE` y `check-webhook.sh`.
+- THE SYSTEM SHALL cubrir con pruebas unitarias la firma y la entrega de webhooks (R16), la clasificación de errores y la decisión entre reintento y DLT (R18), y con pruebas de integración la aplicación idempotente del ledger (R19).
 
 ---
 
@@ -159,7 +159,7 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 | R13 | T16–T17 | Prueba unitaria de `buildPaymentEvent` y validación contra `asyncapi.yaml` |
 | R14 | T15 | `kafka-topics.sh --describe` y Kafka UI |
 | R15 | T17 | Prueba de integración (relay) y prueba manual deteniendo Kafka |
-| R16 | T19 | Pruebas unitarias de firma, logs de `merchant-sim` y tabla `notifier.deliveries` |
+| R16 | T19 | Pruebas unitarias de firma y entrega (`signing.spec.ts`, `deliver.spec.ts`) y logs de `merchant-sim` |
 | R17 | T18 | Pruebas manuales con `curl` (`200`/`400`/`401`/duplicado) |
 | R18 | T20 | Pruebas unitarias y prueba manual con `FAIL_RATE` |
 | R19 | T21 | Prueba de integración (Testcontainers) y consulta de diferencias entre saldos y pagos aprobados con evento |

@@ -13,7 +13,7 @@
   },
   "keywords": [],
   "author": "CGR",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "kafkajs": "^2.2.4",
