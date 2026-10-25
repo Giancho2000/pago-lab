@@ -60,7 +60,7 @@ La Fase 3 (OAuth2 y server MCP) es la siguiente. El plan completo está en la [h
 | **Consumidores independientes** | `notifier` y `ledger` leen el mismo topic con consumer groups distintos: cada uno avanza a su ritmo, y si uno se detiene el otro sigue. Cada servicio es dueño de su propio schema de base de datos. |
 | **Paginación eficiente** | Paginación por cursor (*keyset*) sobre `(created_at, id)` con un índice compuesto. El tiempo de respuesta no se degrada al avanzar páginas. |
 | **Operación** | Endpoints `/health/live` y `/health/ready`, apagado ordenado ante `SIGTERM` (deja de estar listo, termina las peticiones en curso y cierra el pool) y errores en formato **RFC 9457** (`application/problem+json`). |
-| **Pruebas de verdad** | Pruebas de integración contra un PostgreSQL real con **Testcontainers** y una pasarela falsa determinista. Incluyen escenarios de concurrencia. |
+| **Pruebas contra infraestructura real** | Pruebas de integración contra un PostgreSQL real con **Testcontainers**, una pasarela falsa determinista y escenarios de concurrencia. Los consumidores tienen pruebas propias de firma, entrega, reintentos y aplicación exactamente una vez. |
 | **Contenedores** | Dockerfile *multi-stage* con un usuario sin privilegios y *healthcheck*. Todo el stack se levanta con un solo comando de Docker Compose. |
 
 ---
@@ -169,7 +169,7 @@ pagos-lab/
 │   ├── notifier/                # Consumidor de Kafka que entrega webhooks
 │   │   ├── src/                 # main.ts (consumidores), deliver.ts, signing.ts,
 │   │   │                        # retry.ts (retry/DLT) y dlt-replay.ts
-│   │   └── test/                # Pruebas unitarias de la firma y del retry/DLT
+│   │   └── test/                # Pruebas unitarias de firma, entrega y retry/DLT
 │   └── ledger/                  # Consumidor de Kafka que lleva los saldos
 │       ├── src/                 # main.ts (consumidor) y apply.ts (exactamente una vez)
 │       └── test/                # Pruebas de integración contra PostgreSQL real
@@ -350,8 +350,8 @@ Cada vez que un pago llega a un estado de interés para el comercio, se genera u
 
 | Fallo | Ejemplo | Destino |
 |---|---|---|
-| Reintentable | `5xx`, timeout, comercio caído | `payments.events.retry`, con espera de 5 s, 30 s y 120 s |
-| No reintentable | `400`, `401`, mensaje no JSON o sin `eventId` | `payments.events.dlt`, directo |
+| Reintentable | `5xx`, otro `4xx` (`403`, `404`…), timeout, comercio caído | `payments.events.retry`, con espera de 5 s, 30 s y 120 s |
+| No reintentable | `400`, `401`, mensaje no JSON o sin `eventId`/`data.id` | `payments.events.dlt`, directo |
 | Reintentos agotados | 4.º fallo consecutivo | `payments.events.dlt` |
 
 - **Cabeceras:** el mensaje derivado conserva su clave (`paymentId`), su cuerpo y sus cabeceras originales, y agrega `attempt`, `not-before`, `last-error` y `original-topic`.
@@ -478,7 +478,7 @@ Desde `apps/notifier` y `apps/ledger`, `npm test` ejecuta las pruebas de cada se
 
 **Estado actual:**
 - `payments-api`: 107 pruebas en verde · **96,7 %** de cobertura de líneas.
-- `notifier`: 9 pruebas unitarias (firma de webhooks y decisión entre reintento y DLT).
+- `notifier`: 25 pruebas unitarias (firma, entrega de webhooks y decisión entre reintento y DLT).
 - `ledger`: 7 pruebas (integración de `apply` contra PostgreSQL y validación de eventos).
 
 ### Estrategia
@@ -486,6 +486,7 @@ Desde `apps/notifier` y `apps/ledger`, `npm test` ejecuta las pruebas de cada se
 - **Unitarias:** máquina de estados, cliente de la pasarela (respuestas `201`/`402`/`4xx`/`5xx` y timeout), ciclo del resolver y manejo de transacciones.
 - **Unitarias del notifier:**
   - la firma usa segundos, firma exactamente `"<t>.<cuerpo>"` como verifica el receptor y cambia si cambia un byte del cuerpo o el secreto;
+  - `deliver`, con `fetch` y pool simulados, no reenvía lo ya entregado, envía un POST cuya firma se verifica igual que en el receptor, trata `400`/`401` como no reintentables y `5xx`, otros `4xx`, timeouts y fallos al registrar la entrega como reintentables; `parseEvent` rechaza mensajes no JSON o incompletos;
   - `sendToRetryOrDlt` aplica el *backoff* correcto en cada intento, manda al DLT el 4.º fallo y los errores no reintentables, y conserva la clave, el cuerpo y las cabeceras originales.
 - **Integración del ledger:** contra un PostgreSQL efímero con la migración real. Verifican que un evento repetido aplica una sola vez, que los saldos se separan por comercio y moneda, que los otros tipos se ignoran sin dejar marca, que **dos aplicaciones simultáneas del mismo evento** solo suman una vez y que, si falla la actualización del saldo, **la marca también se revierte** (todo o nada).
 - **Integración (e2e):** la aplicación completa contra un PostgreSQL efímero, con las migraciones reales, una pasarela falsa determinista y un productor de Kafka falso. Las pruebas están organizadas por requisito e incluyen:
@@ -638,6 +639,17 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM payments
 SQL
 ```
 
+**6. Del pago al webhook y al saldo**
+
+```bash
+FAIL_RATE=0 docker compose up -d merchant-sim
+docker compose logs -f notifier merchant-sim ledger     # en otra terminal
+
+node scripts/create-payments.mjs 3
+```
+
+Por cada pago se ve el evento entregado (`"result":"delivered"`), el webhook verificado en merchant-sim (`OK payment.approved pago=…`) y, si fue aprobado, el saldo aplicado en el ledger (`"result":"applied"`). En Kafka UI (http://localhost:8081), el grupo `notifier` y el grupo `ledger` vuelven a lag 0.
+
 ---
 
 ## Historial de construcción
@@ -673,7 +685,7 @@ La Fase 2 se construyó en estos tickets:
 | T19 | Notifier con commits manuales y entrega idempotente |
 | T20 | Retry topic con backoff y DLT |
 | T21 | Ledger con efecto exactamente una vez |
-| T24 | Cierre de la fase: specs revisados, Kafka UI y publicación open source |
+| T24 | Cierre de la fase: specs revisados, pruebas de entrega del notifier, Kafka UI y publicación open source |
 
 Los laboratorios prácticos de consumer groups (T22) y de SQS con ElasticMQ (T23) quedan como ejercicios de estudio y no forman parte del código publicado.
 
