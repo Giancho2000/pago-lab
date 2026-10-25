@@ -22,8 +22,8 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 | **Notifier** | Consumidor que entrega los eventos a los comercios mediante webhooks |
 | **Ledger** | Consumidor que mantiene los saldos aprobados por comercio |
 | **Comercio** | Receptor de webhooks; en el laboratorio lo simula `merchant-sim` |
-| **Error reintentable** | Fallo transitorio: respuesta `5xx`, timeout o error de red |
-| **Error no reintentable** | Fallo que no se corrige repitiendo: JSON inválido o rechazo `400`/`401` del receptor |
+| **Error reintentable** | Fallo transitorio: respuesta `5xx`, timeout, error de red o cualquier otra respuesta no `2xx` distinta de `400`/`401` (por ejemplo `403`, `404` o `422`) |
+| **Error no reintentable** | Fallo que no se corrige repitiendo: JSON inválido, evento sin `eventId` o `data.id` UUID, o rechazo `400`/`401` del receptor |
 
 ---
 
@@ -92,6 +92,7 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 - IF la firma no coincide, THEN THE SYSTEM SHALL responder `401`.
 - IF la cabecera `PagoLab-Signature` falta o no tiene el formato `t=<segundos>,v1=<hex>`, THEN THE SYSTEM SHALL responder `400`.
 - IF la firma es válida pero el cuerpo no es JSON válido, THEN THE SYSTEM SHALL responder `400` (nunca `5xx`, para que el emisor no lo reintente).
+- IF el cuerpo es JSON válido pero no incluye `eventId` o `data.id`, THEN THE SYSTEM SHALL responder `400`.
 - IF el `eventId` ya fue procesado, THEN THE SYSTEM SHALL responder `200` indicando que es un duplicado y no reprocesarlo.
 - WHERE `FAIL_RATE` es mayor que 0, THE SYSTEM SHALL responder `500` a esa proporción de webhooks válidos, para simular un comercio inestable (T20).
 
@@ -114,7 +115,7 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 - IF el evento ya fue procesado, THEN THE SYSTEM SHALL ignorarlo sin modificar los saldos.
 - THE SYSTEM SHALL ignorar los tipos de evento distintos de `payment.approved`.
 - THE SYSTEM SHALL mantener, para cada comercio y moneda, un saldo aprobado igual a la suma de los montos de sus pagos `APPROVED` que generaron un evento `payment.approved`. Los pagos anteriores al outbox (T16), como los del seed de la Fase 1, nunca se publicaron y quedan fuera del ledger.
-- IF un mensaje de `payments.events` no es un evento válido (no es JSON, no tiene `eventId` UUID o es un `payment.approved` sin `merchantId`, `amountCents` entero positivo o `currency`), THEN THE SYSTEM SHALL registrarlo con nivel de error y continuar con el siguiente.
+- IF un mensaje de `payments.events` no es un evento válido (no es JSON, no tiene `eventId` UUID, no tiene `type` o es un `payment.approved` sin `merchantId`, `amountCents` entero positivo o `currency`), THEN THE SYSTEM SHALL registrarlo con nivel de error y continuar con el siguiente.
 - IF falla la base de datos del ledger, THEN THE SYSTEM SHALL dejar de avanzar sin confirmar el offset y reintentar el mismo mensaje hasta que la base de datos vuelva.
 - WHEN se reinician los offsets del grupo `ledger` al inicio del topic sobre tablas vacías, THE SYSTEM SHALL reconstruir los mismos saldos para los eventos que sigan dentro de la retención del topic (7 días).
 
@@ -130,14 +131,14 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 
 - WHEN un servicio consumidor recibe `SIGTERM` o `SIGINT`, THE SYSTEM SHALL desconectar sus consumidores del grupo, cerrar sus productores y su pool de base de datos, y terminar.
 - WHEN `payments-api` se apaga, THE SYSTEM SHALL desconectar el productor de Kafka.
-- THE SYSTEM SHALL emitir logs estructurados en JSON que incluyan, por cada mensaje procesado, `eventId`, partición, offset y resultado.
+- THE SYSTEM SHALL emitir en los consumidores (`notifier` y `ledger`) logs estructurados en JSON que incluyan, por cada mensaje procesado, `eventId`, partición, offset y resultado. El relay de `payments-api` registra solo los errores y la purga del outbox con el logger de Nest; los logs JSON de la API llegan en la Fase 5.
 
 ## R22 · Calidad
 *Todos los tickets*
 
 - THE SYSTEM SHALL mantener en `payments-api` una cobertura de pruebas ≥ 85 % de líneas.
 - THE SYSTEM SHALL cubrir con pruebas de integración contra PostgreSQL real los requisitos R11 y R12.
-- THE SYSTEM SHALL cubrir con pruebas unitarias la firma de webhooks (R16), la clasificación de errores y la decisión entre reintento y DLT (R18), y la aplicación idempotente del ledger (R19).
+- THE SYSTEM SHALL cubrir con pruebas unitarias la firma de webhooks (R16) y la decisión entre reintento y DLT (R18), y con pruebas de integración la aplicación idempotente del ledger (R19). La clasificación de las respuestas HTTP en `deliver` se verifica manualmente con `FAIL_RATE` y `check-webhook.sh`.
 
 ---
 
@@ -158,7 +159,7 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 | R13 | T16–T17 | Prueba unitaria de `buildPaymentEvent` y validación contra `asyncapi.yaml` |
 | R14 | T15 | `kafka-topics.sh --describe` y Kafka UI |
 | R15 | T17 | Prueba de integración (relay) y prueba manual deteniendo Kafka |
-| R16 | T19 | Pruebas unitarias de firma y entrega, y logs de `merchant-sim` |
+| R16 | T19 | Pruebas unitarias de firma, logs de `merchant-sim` y tabla `notifier.deliveries` |
 | R17 | T18 | Pruebas manuales con `curl` (`200`/`400`/`401`/duplicado) |
 | R18 | T20 | Pruebas unitarias y prueba manual con `FAIL_RATE` |
 | R19 | T21 | Prueba de integración (Testcontainers) y consulta de diferencias entre saldos y pagos aprobados con evento |

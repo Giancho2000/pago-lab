@@ -1,14 +1,21 @@
 # PagoLab
 
-**PagoLab** es un simulador de procesamiento de pagos. Lo construyo como laboratorio para aplicar prácticas de backend de nivel productivo en un dominio donde los errores cuestan dinero: cobros duplicados, pasarelas que no responden y estados que nadie sabe resolver.
+[![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
+![Node.js 22](https://img.shields.io/badge/Node.js-22-339933?logo=node.js&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-ESM-3178C6?logo=typescript&logoColor=white)
+![PostgreSQL 17](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)
+![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.9%20KRaft-231F20?logo=apachekafka&logoColor=white)
+![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+
+**PagoLab** es un simulador de procesamiento de pagos **open source**. Lo construyo como laboratorio para aplicar prácticas de backend de nivel productivo en un dominio donde los errores cuestan dinero: cobros duplicados, pasarelas que no responden, eventos que se pierden y estados que nadie sabe resolver.
 
 El proyecto sigue un enfoque **Spec-Driven Development (SDD)**: primero se escriben los requisitos (EARS) y los contratos (OpenAPI para la API, AsyncAPI para los eventos), y después el código. Cada ticket es una rama y un *pull request* con su propio historial.
 
-**Estado actual:** la Fase 1 (núcleo de pagos) está completa. La Fase 2 (eventos con Kafka) va por **T21**: cada cambio de estado de un pago se publica en Kafka mediante un *transactional outbox*. Dos consumidores independientes leen esos eventos:
+**Estado actual:** las fases 1 (núcleo de pagos) y 2 (eventos con Kafka) están completas. Cada cambio de estado de un pago se publica en Kafka mediante un *transactional outbox*, y dos consumidores independientes leen esos eventos:
 - **`notifier`** los entrega al comercio como webhook firmado con HMAC. Si la entrega falla, la reintenta con *backoff* (5 s, 30 s, 120 s) en un topic aparte, y lo que no se puede entregar termina en un *dead letter topic* que se puede reprocesar.
 - **`ledger`** lleva los saldos aprobados por comercio y moneda con **efecto exactamente una vez**.
 
-Los laboratorios de consumer groups (T22) y de SQS (T23) son los siguientes pasos.
+La Fase 3 (OAuth2 y server MCP) es la siguiente. El plan completo está en la [hoja de ruta](#hoja-de-ruta).
 
 
 ---
@@ -29,6 +36,8 @@ Los laboratorios de consumer groups (T22) y de SQS (T23) son los siguientes paso
 12. [Historial de construcción](#historial-de-construcción)
 13. [Hoja de ruta](#hoja-de-ruta)
 14. [Documentación](#documentación)
+15. [Contribuir](#contribuir)
+16. [Licencia](#licencia)
 
 ---
 
@@ -171,7 +180,7 @@ pagos-lab/
 ├── scripts/create-payments.mjs  # Crea N pagos de prueba contra la API local
 ├── specs/
 │   ├── fase-1/                  # Requisitos (EARS) y diseño
-│   └── fase-2/                  # Requisitos, diseño, AsyncAPI, plan y laboratorios
+│   └── fase-2/                  # Requisitos, diseño, AsyncAPI y plan por ticket
 └── docker-compose.yml
 ```
 
@@ -195,7 +204,9 @@ cd pago-lab
 docker compose up -d --build
 ```
 
-Compose arranca PostgreSQL y Kafka, espera sus *healthchecks*, aplica las migraciones y crea los topics. Después inicia la pasarela, el comercio, la API y el notifier.
+Compose arranca PostgreSQL y Kafka, espera sus *healthchecks*, aplica las migraciones y crea los topics. Después inicia la pasarela, el comercio, la API y los consumidores (`notifier` y `ledger`).
+
+> Las credenciales del `docker-compose.yml` (`pagolab`/`pagolab` en PostgreSQL, `whsec_local` como secreto de webhooks) son **solo para desarrollo local**. En cualquier otro entorno deben venir de variables de entorno o de un gestor de secretos.
 
 ### Verificar
 
@@ -205,7 +216,7 @@ curl localhost:3000/health/live           # {"status":"ok"}
 curl localhost:3000/health/ready          # {"status":"ready"}
 ```
 
-Si `payments-api` o `notifier` se quedan en estado `Created`, es porque algo de lo que dependen falló. Lo más común es que `migrate` termine con un error: `docker compose logs migrate` muestra la línea exacta.
+Si `payments-api`, `notifier` o `ledger` se quedan en estado `Created`, es porque algo de lo que dependen falló. Lo más común es que `migrate` termine con un error: `docker compose logs migrate` muestra la línea exacta.
 
 - Documentación interactiva de la API: **http://localhost:3000/docs**
 - Kafka UI (topics, mensajes, consumer groups): **http://localhost:8081**
@@ -422,6 +433,20 @@ docker compose exec notifier npm run dlt:replay
 
 > En Git Bash, si un comando con rutas como `/opt/kafka/...` falla con `no such file or directory` y una ruta `C:/Program Files/Git/...`, antepón `MSYS_NO_PATHCONV=1`. Git Bash convierte las rutas que empiezan con `/` en rutas de Windows.
 
+### Ver los eventos en Kafka UI
+
+Kafka UI (**http://localhost:8081**) muestra lo mismo que los comandos anteriores sin usar la terminal:
+
+| Qué quieres ver | Dónde | Qué buscar |
+|---|---|---|
+| Los eventos de un pago | *Topics* → `payments.events` → *Messages* | La **clave** es el `paymentId`: todos los eventos de un pago caen en la misma partición y en orden. El **valor** es el JSON del contrato ([AsyncAPI](specs/fase-2/asyncapi.yaml)) |
+| Reintentos en espera | *Topics* → `payments.events.retry` → *Messages* | Las **cabeceras** `attempt` (1–3), `not-before` (momento del reintento, en milisegundos *epoch*) y `last-error` |
+| Mensajes que no se pudieron entregar | *Topics* → `payments.events.dlt` → *Messages* | `attempt: 4`, o un error no reintentable (`400`, `401`, mensaje no JSON) en `last-error` |
+| El avance de cada consumidor | *Consumers* | Los grupos `notifier`, `notifier-retry`, `ledger` y `dlt-replay`, con el **lag** por partición. `0` significa que el grupo está al día |
+| Cómo se reparten las particiones | *Consumers* → `notifier` | Con `docker compose up -d --scale notifier=3`, cada réplica toma 2 de las 6 particiones |
+
+Prueba rápida: detén el notifier (`docker compose stop notifier`), crea 20 pagos (`node scripts/create-payments.mjs 20`) y mira en *Consumers* cómo crece el lag del grupo `notifier` mientras el del `ledger` sigue en 0. Al iniciarlo de nuevo (`docker compose start notifier`), el lag vuelve a 0 sin perder ningún evento.
+
 ### Verificar el receptor de webhooks
 
 `apps/merchant-sim/scripts/check-webhook.sh` firma peticiones con `openssl` y comprueba las respuestas de merchant-sim: firma válida `200`, cuerpo o `t` alterados `401`, firma de hace 10 minutos `400`, cabecera ausente o mal formada `400`, cuerpo no JSON `400` y duplicado `200`.
@@ -636,21 +661,21 @@ La Fase 1 se construyó en 14 tickets, cada uno en su rama y su *pull request*:
 | T12 | Paginación por cursor y laboratorio de `EXPLAIN ANALYZE` |
 | T13 | README, diseño final y guion de demostración |
 
-La Fase 2 está en curso:
+La Fase 2 se construyó en estos tickets:
 
-| Ticket | Entrega | Estado |
-|---|---|---|
-| T14 | Recuperación de claves de idempotencia huérfanas | ✅ |
-| T15 | Kafka en KRaft, Kafka UI y creación de topics | ✅ |
-| T16 | *Transactional outbox* para los eventos de pagos | ✅ |
-| T17 | Relay del outbox hacia Kafka con productor idempotente | ✅ |
-| T18 | Comercio simulado con verificación HMAC de webhooks | ✅ |
-| T19 | Notifier con commits manuales y entrega idempotente | ✅ |
-| T20 | Retry topic con backoff y DLT | ✅ |
-| T21 | Ledger con efecto exactamente una vez | ✅ |
-| T22 | Laboratorio de consumer groups | Pendiente |
-| T23 | Laboratorio SQS con ElasticMQ | Pendiente |
-| T24 | Cierre de la fase | Pendiente |
+| Ticket | Entrega |
+|---|---|
+| T14 | Recuperación de claves de idempotencia huérfanas |
+| T15 | Kafka en KRaft, Kafka UI y creación de topics |
+| T16 | *Transactional outbox* para los eventos de pagos |
+| T17 | Relay del outbox hacia Kafka con productor idempotente |
+| T18 | Comercio simulado con verificación HMAC de webhooks |
+| T19 | Notifier con commits manuales y entrega idempotente |
+| T20 | Retry topic con backoff y DLT |
+| T21 | Ledger con efecto exactamente una vez |
+| T24 | Cierre de la fase: specs revisados, Kafka UI y publicación open source |
+
+Los laboratorios prácticos de consumer groups (T22) y de SQS con ElasticMQ (T23) quedan como ejercicios de estudio y no forman parte del código publicado.
 
 ---
 
@@ -659,7 +684,7 @@ La Fase 2 está en curso:
 | Fase | Tema | Contenido principal |
 |---|---|---|
 | **1** ✅ | Núcleo de pagos + Docker | Idempotencia, máquina de estados, resolver concurrente, Testcontainers, multi-stage |
-| **2** 🚧 | Eventos con Kafka | Recuperación de claves huérfanas, Kafka en KRaft, *transactional outbox*, webhooks firmados con HMAC, *retry topic* y DLT, consumidores idempotentes, comparación con SQS (ElasticMQ) |
+| **2** ✅ | Eventos con Kafka | Recuperación de claves huérfanas, Kafka en KRaft, *transactional outbox*, webhooks firmados con HMAC, *retry topic* y DLT, consumidores idempotentes, ledger con efecto exactamente una vez |
 | **3** | Server MCP + OAuth2 | Keycloak, Authorization Code + PKCE, JWT con *scopes*, server MCP con tools de lectura y escritura, confirmación humana, defensas contra *prompt injection* |
 | **4** | IA aplicada | Agente con Anthropic SDK y *tool use*, pgvector, búsqueda híbrida, RAG como tool MCP, sistema de evaluaciones |
 | **5** | Observabilidad | Prometheus, Grafana, Loki, Tempo, OpenTelemetry, SLO con alertas por *burn rate*, *circuit breaker* |
@@ -677,3 +702,19 @@ La Fase 2 está en curso:
 - [`specs/fase-2/design.md`](specs/fase-2/design.md): diseño de eventos, outbox, webhooks, reintentos y ledger
 - [`specs/fase-2/asyncapi.yaml`](specs/fase-2/asyncapi.yaml): contrato de los eventos
 - [`specs/fase-2/tasks.md`](specs/fase-2/tasks.md): plan de implementación por ticket
+
+---
+
+## Contribuir
+
+PagoLab es un proyecto de aprendizaje abierto. Las *issues* con dudas, errores o propuestas son bienvenidas, igual que los *pull requests*.
+
+1. Abre primero una *issue* para cambios grandes, así acordamos el enfoque antes de escribir código.
+2. Crea una rama desde `develop` y mantén el estilo del proyecto: SQL explícito, pruebas contra infraestructura real (Testcontainers) y specs actualizados si cambia el comportamiento.
+3. Antes del PR, ejecuta en cada servicio que modifiques `npm test && npx tsc --noEmit`, y comprueba que el stack completo levanta con `docker compose up -d --build`.
+
+---
+
+## Licencia
+
+Distribuido bajo la licencia [MIT](LICENSE). Puedes usar, copiar, modificar y distribuir el código, incluso con fines comerciales, conservando el aviso de copyright.

@@ -111,7 +111,7 @@ flowchart LR
 
 | Tabla | Columnas | Motivo |
 |---|---|---|
-| `notifier.deliveries` | `event_id uuid PK`, `payment_id uuid`, `delivered_at` | Registro de entregas exitosas: evita reenviar tras un reinicio o un rebalanceo |
+| `notifier.deliveries` | `event_id uuid PK`, `payment_id uuid NOT NULL`, `delivered_at timestamptz NOT NULL DEFAULT now()` | Registro de entregas exitosas: evita reenviar tras un reinicio o un rebalanceo |
 
 ### 4.3 Schema `ledger`
 
@@ -230,9 +230,9 @@ sequenceDiagram
     N->>M: POST + PagoLab-Signature (timeout 5 s)
     alt 2xx
       N->>DB: INSERT deliveries
-    else 5xx / timeout / red
+    else 5xx / otro 4xx / timeout / red
       N->>RT: attempt=1, not-before=now+5 s, last-error
-    else 400 / 401 / JSON inválido
+    else 400 / 401 / JSON inválido / evento incompleto
       N->>D: last-error
     end
     N->>K: commit offset n+1
@@ -307,7 +307,7 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 - **Kafka garantiza el orden solo dentro de una partición.** Con `key = paymentId`, todos los eventos de un pago caen en la misma partición y se consumen en el orden en que se publicaron.
 - **El relay corre en una sola instancia:** con dos relays, el evento `payment.unknown` de un pago podría publicarse después de su `payment.approved`. `FOR UPDATE SKIP LOCKED` evita la doble publicación, pero no garantiza el orden entre instancias. En Kubernetes (Fase 6) será un `Deployment` de 1 réplica.
 - **Productor idempotente con `maxInFlightRequests: 1`:** los reintentos internos del productor no duplican ni reordenan mensajes dentro de la partición.
-- **Los reintentos rompen el orden estricto por pago:** si el webhook de `payment.unknown` entra a reintento, el de `payment.approved` puede llegar antes. Mitigación adoptada: el contrato incluye `occurredAt` y el receptor ignora los eventos más antiguos que el último que procesó para ese pago. Alternativa descartada por ahora: bloquear la clave mientras tenga un reintento pendiente. Preserva el orden, pero agrega estado y reintroduce bloqueo.
+- **Los reintentos rompen el orden estricto por pago:** si el webhook de `payment.unknown` entra a reintento, el de `payment.approved` puede llegar antes. Mitigación recomendada al comercio: el contrato incluye `occurredAt`, y un receptor real debe ignorar los eventos más antiguos que el último que procesó para ese pago. `merchant-sim` solo deduplica por `eventId` y no aplica esta regla. Alternativa descartada por ahora: bloquear la clave mientras tenga un reintento pendiente. Preserva el orden, pero agrega estado y reintroduce bloqueo.
 
 ---
 
@@ -317,9 +317,12 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 |---|---|---|---|
 | Respuesta `5xx` del comercio | `500` simulado (`FAIL_RATE`) | Sí | `payments.events.retry` |
 | Timeout o error de red | Comercio caído o lento (> 5 s) | Sí | `payments.events.retry` |
+| Otra respuesta no `2xx` | `403`, `404`, `422` | Sí | `payments.events.retry` |
+| Fallo al registrar la entrega | `notifier.deliveries` no disponible | Sí | `payments.events.retry`: el webhook se reenvía y el comercio lo deduplica por `eventId` |
 | Firma rechazada | `401` | No | `payments.events.dlt` |
 | Petición rechazada | `400` (p. ej., reloj desfasado) | No | `payments.events.dlt` |
 | Mensaje no deserializable | Texto no JSON (`SyntaxError`) | No | `payments.events.dlt` |
+| Evento incompleto | JSON sin `eventId` o `data.id` UUID | No | `payments.events.dlt` |
 | Reintentos agotados | 4.º fallo consecutivo | — | `payments.events.dlt` |
 
 **Por qué un topic de reintento y no reintentar en el mismo lugar:** reintentar dentro de `eachMessage` con esperas de 2 minutos bloquearía toda la partición, y con ella los eventos de muchos otros pagos (*head-of-line blocking*). Al derivar el mensaje fallido, la partición principal sigue avanzando.
@@ -360,8 +363,9 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 | Outbox (R12) | Integración | Pago aprobado → exactamente 1 evento · `UNKNOWN → APPROVED` → 2 eventos en orden · fallo después del `UPDATE` → ni cambio ni evento |
 | `buildPaymentEvent` (R13) | Unitaria | Mapeo estado → tipo · `PENDING`/`PROCESSING` → `null` · forma conforme al contrato |
 | Relay (R15) | Integración (Postgres de Testcontainers + productor falso) · unitaria del ciclo | Clave = id del pago, cabeceras y orden de creación; no repite lo publicado · si `send` falla no marca nada y el reintento reenvía el mismo lote · dos lotes concurrentes no duplican (`SKIP LOCKED`) · la limpieza borra solo lo publicado hace más de 7 días · `tick` vacía el backlog y sobrevive a un error |
-| Firma (R16) | Unitaria | Firma determinista con un `now` fijo · el receptor acepta la propia firma |
-| Clasificación de errores (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
+| Firma (R16) | Unitaria + manual | Firma determinista con un `now` fijo y HMAC recalculado de forma independiente · la aceptación por `merchant-sim` se verifica en vivo con `check-webhook.sh` y los logs |
+| Retry/DLT (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
+| Clasificación HTTP en `deliver` (R18) | Manual (`FAIL_RATE`) | `5xx` → retry · `400`/`401` → DLT · éxito → fila en `notifier.deliveries`. Pendiente: prueba unitaria con `fetch` simulado |
 | Ledger (R19) | Integración (Postgres de Testcontainers con la migración real) | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado sin marca · saldos = suma de aprobados por comercio y moneda · dos aplicaciones simultáneas del mismo evento → solo una aplica · fallo en el saldo → la marca también se revierte · `parseEvent` rechaza lo no JSON y los aprobados sin monto válido |
 | Receptor (R17) | Manual (`curl` + `openssl` para firmar) | Firma válida `200` · cuerpo alterado `401` · `t` alterado sin volver a firmar `401` · `t` de hace 10 min `400` · sin cabecera `400` · cuerpo no JSON con firma válida `400` · duplicado `200` · `FAIL_RATE` ≈ proporción de `500` |
 | Topología y grupos (R14, R20) | Laboratorio | `kafka-lab.md` (archivo local, no versionado) |
@@ -392,7 +396,7 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 ## 14. Limitaciones conocidas
 
 - **Un solo comercio y un solo secreto:** no hay registro de comercios con su URL y secreto, ni rotación de secretos. Para la rotación, el formato admite varias firmas `v1` durante una transición, pero aún no se implementa.
-- **Orden no estricto tras reintentos:** mitigado con `occurredAt` del lado del receptor (§ 9).
+- **Orden no estricto tras reintentos:** el comercio debe usar `occurredAt` para descartar eventos antiguos (§ 9); `merchant-sim` no lo implementa.
 - **`merchant-sim` deduplica en memoria:** pierde su registro al reiniciarse; un receptor real lo persistiría.
 - **Relay sin alta disponibilidad:** si su única instancia cae, los eventos esperan en el outbox hasta que vuelva. No se pierden, pero se retrasan. Esto se mejorará con *leader election* en Kubernetes.
 - **Broker único:** sin tolerancia a fallos de Kafka (`replication.factor = 1`).
