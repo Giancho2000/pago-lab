@@ -111,14 +111,24 @@ flowchart LR
 
 | Tabla | Columnas | Motivo |
 |---|---|---|
-| `notifier.deliveries` | `event_id uuid PK`, `payment_id uuid`, `delivered_at` | Registro de entregas exitosas: evita reenviar tras un reinicio o un rebalanceo |
+| `notifier.deliveries` | `event_id uuid PK`, `payment_id uuid NOT NULL`, `delivered_at timestamptz NOT NULL DEFAULT now()` | Registro de entregas exitosas: evita reenviar tras un reinicio o un rebalanceo |
 
 ### 4.3 Schema `ledger`
 
 | Tabla | Columnas | Motivo |
 |---|---|---|
 | `ledger.processed_events` | `event_id uuid PK`, `processed_at` | Marca de procesado. Su PK hace atómica la deduplicación |
-| `ledger.merchant_balances` | `merchant_id PK`, `approved_cents bigint`, `approved_count int` | Saldo acumulado. Se actualiza con `INSERT … ON CONFLICT DO UPDATE` |
+| `ledger.merchant_balances` | `merchant_id text`, `currency text`, `approved_cents bigint CHECK ≥ 0`, `approved_count int CHECK ≥ 0`; PK `(merchant_id, currency)` | Saldo acumulado por comercio **y moneda**: sumar centavos de COP con centavos de USD daría un número sin significado. Se actualiza con `INSERT … ON CONFLICT DO UPDATE`, y la suma ocurre en PostgreSQL para evitar *lost updates*. `bigint` porque 3 pagos del máximo permitido (10⁹ centavos) ya desbordan un `int` |
+
+**Implementación del ledger (T21)** · `apps/ledger/src/apply.ts`
+
+| Aspecto | Decisión | Por qué |
+|---|---|---|
+| Exactamente una vez | `INSERT INTO processed_events … ON CONFLICT DO NOTHING RETURNING 1` y el *upsert* del saldo en la misma transacción, en una conexión dedicada (`pool.connect()`) | La marca y el efecto se confirman juntos. Si el proceso muere antes del `COMMIT` no queda nada; si muere después, el reproceso ve la marca y devuelve `duplicate` |
+| Concurrencia | La PK de `processed_events` | Si dos réplicas procesan el mismo evento durante un rebalanceo, el segundo `INSERT` espera el bloqueo del primero y, tras su `COMMIT`, cae en `DO NOTHING` |
+| Otros tipos | `ignored` sin registrar nada | No hay efecto que proteger; `processed_events` no crece con eventos irrelevantes |
+| Mensaje inválido | `parseEvent` lanza `InvalidEventError`; se registra con nivel `error` y se confirma el offset | Un mensaje ilegible nunca será válido y no puede representar un pago aprobado legible. Bloquear la partición por él detendría el ledger para siempre |
+| Base de datos caída | El error se relanza: sin commit, kafkajs reintenta el mismo mensaje | La dependencia es propia: todos los mensajes fallarían igual, y saltarse un `payment.approved` dejaría saldos incorrectos. Estar atrasado es aceptable; estar equivocado, no |
 
 **Un schema por servicio:** cada consumidor es dueño de sus datos y no lee tablas ajenas. Comparten instancia de PostgreSQL solo por economía del laboratorio; separarlos en bases distintas no requeriría cambios de código.
 
@@ -220,9 +230,9 @@ sequenceDiagram
     N->>M: POST + PagoLab-Signature (timeout 5 s)
     alt 2xx
       N->>DB: INSERT deliveries
-    else 5xx / timeout / red
+    else 5xx / otro 4xx / timeout / red
       N->>RT: attempt=1, not-before=now+5 s, last-error
-    else 400 / 401 / JSON inválido
+    else 400 / 401 / JSON inválido / evento incompleto
       N->>D: last-error
     end
     N->>K: commit offset n+1
@@ -266,9 +276,12 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 **Verificación en el receptor**, en este orden:
 
 1. Leer el cuerpo **crudo** (`express.raw`). Si se parsea a JSON y se vuelve a serializar, puede cambiar el orden de las claves o los espacios, y la firma deja de coincidir.
-2. Rechazar con `400` si `|ahora − t| > 300 s`. La marca de tiempo forma parte de lo firmado, así que no puede alterarse sin invalidar la firma. Esto limita los ataques de repetición (*replay*) a una ventana de 5 minutos.
+2. Rechazar con `400` si la cabecera falta o está mal formada, o si `|ahora − t| > 300 s`. La marca de tiempo forma parte de lo firmado, así que no puede alterarse sin invalidar la firma. Esto limita los ataques de repetición (*replay*) a una ventana de 5 minutos.
 3. Recalcular el HMAC y comparar con `timingSafeEqual`, tras verificar que ambas longitudes coinciden. Una comparación normal (`===`) termina en el primer byte distinto, y su tiempo de respuesta revela cuántos bytes acertó un atacante. Si falla, responder `401`.
-4. Deduplicar por `eventId` y responder `200` también a los duplicados. Si respondiera error, el emisor seguiría reintentando.
+4. Parsear el JSON **después** de verificar la firma. Si no es JSON válido, responder `400`. Sin este control, `JSON.parse` lanza una excepción, Express responde `500` y el notifier lo trataría como reintentable (§ 10), cuando reintentar nunca lo arreglará.
+5. Deduplicar por `eventId` y responder `200` también a los duplicados. Si respondiera error, el emisor seguiría reintentando.
+
+El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pasos 4 y 5: representa un error transitorio del comercio, no un mensaje defectuoso.
 
 **Por qué HMAC:** con un secreto compartido, el comercio comprueba dos cosas: que el mensaje lo envió PagoLab (autenticidad) y que nadie lo alteró en el camino (integridad).
 
@@ -294,7 +307,7 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 - **Kafka garantiza el orden solo dentro de una partición.** Con `key = paymentId`, todos los eventos de un pago caen en la misma partición y se consumen en el orden en que se publicaron.
 - **El relay corre en una sola instancia:** con dos relays, el evento `payment.unknown` de un pago podría publicarse después de su `payment.approved`. `FOR UPDATE SKIP LOCKED` evita la doble publicación, pero no garantiza el orden entre instancias. En Kubernetes (Fase 6) será un `Deployment` de 1 réplica.
 - **Productor idempotente con `maxInFlightRequests: 1`:** los reintentos internos del productor no duplican ni reordenan mensajes dentro de la partición.
-- **Los reintentos rompen el orden estricto por pago:** si el webhook de `payment.unknown` entra a reintento, el de `payment.approved` puede llegar antes. Mitigación adoptada: el contrato incluye `occurredAt` y el receptor ignora los eventos más antiguos que el último que procesó para ese pago. Alternativa descartada por ahora: bloquear la clave mientras tenga un reintento pendiente. Preserva el orden, pero agrega estado y reintroduce bloqueo.
+- **Los reintentos rompen el orden estricto por pago:** si el webhook de `payment.unknown` entra a reintento, el de `payment.approved` puede llegar antes. Mitigación recomendada al comercio: el contrato incluye `occurredAt`, y un receptor real debe ignorar los eventos más antiguos que el último que procesó para ese pago. `merchant-sim` solo deduplica por `eventId` y no aplica esta regla. Alternativa descartada por ahora: bloquear la clave mientras tenga un reintento pendiente. Preserva el orden, pero agrega estado y reintroduce bloqueo.
 
 ---
 
@@ -304,9 +317,12 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 |---|---|---|---|
 | Respuesta `5xx` del comercio | `500` simulado (`FAIL_RATE`) | Sí | `payments.events.retry` |
 | Timeout o error de red | Comercio caído o lento (> 5 s) | Sí | `payments.events.retry` |
+| Otra respuesta no `2xx` | `403`, `404`, `422` | Sí | `payments.events.retry` |
+| Fallo al registrar la entrega | `notifier.deliveries` no disponible | Sí | `payments.events.retry`: el webhook se reenvía y el comercio lo deduplica por `eventId` |
 | Firma rechazada | `401` | No | `payments.events.dlt` |
 | Petición rechazada | `400` (p. ej., reloj desfasado) | No | `payments.events.dlt` |
 | Mensaje no deserializable | Texto no JSON (`SyntaxError`) | No | `payments.events.dlt` |
+| Evento incompleto | JSON sin `eventId` o `data.id` UUID | No | `payments.events.dlt` |
 | Reintentos agotados | 4.º fallo consecutivo | — | `payments.events.dlt` |
 
 **Por qué un topic de reintento y no reintentar en el mismo lugar:** reintentar dentro de `eachMessage` con esperas de 2 minutos bloquearía toda la partición, y con ella los eventos de muchos otros pagos (*head-of-line blocking*). Al derivar el mensaje fallido, la partición principal sigue avanzando.
@@ -324,7 +340,7 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | `DATABASE_URL` | notifier, ledger | `postgres://…@postgres:5432/pagolab` | Conexión a PostgreSQL |
 | `MERCHANT_WEBHOOK_URL` | notifier | `http://merchant-sim:4100/webhooks/pagolab` | Destino de los webhooks |
 | `WEBHOOK_SECRET` | notifier, merchant-sim | `whsec_local` | Secreto HMAC compartido |
-| `FAIL_RATE` | merchant-sim | `0.2` | Proporción de `500` simulados |
+| `FAIL_RATE` | merchant-sim | `${FAIL_RATE:-0.2}` | Proporción de `500` simulados. Se cambia sin editar Compose: `FAIL_RATE=0 docker compose up -d merchant-sim` |
 
 ### Procedimientos
 
@@ -347,11 +363,12 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | Outbox (R12) | Integración | Pago aprobado → exactamente 1 evento · `UNKNOWN → APPROVED` → 2 eventos en orden · fallo después del `UPDATE` → ni cambio ni evento |
 | `buildPaymentEvent` (R13) | Unitaria | Mapeo estado → tipo · `PENDING`/`PROCESSING` → `null` · forma conforme al contrato |
 | Relay (R15) | Integración (Postgres de Testcontainers + productor falso) · unitaria del ciclo | Clave = id del pago, cabeceras y orden de creación; no repite lo publicado · si `send` falla no marca nada y el reintento reenvía el mismo lote · dos lotes concurrentes no duplican (`SKIP LOCKED`) · la limpieza borra solo lo publicado hace más de 7 días · `tick` vacía el backlog y sobrevive a un error |
-| Firma (R16) | Unitaria | Firma determinista con un `now` fijo · el receptor acepta la propia firma |
-| Clasificación de errores (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
-| Ledger (R19) | Integración | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado · saldos = suma de aprobados |
-| Receptor (R17) | Manual (`curl`) | Firma válida `200` · cuerpo alterado `401` · `t` de hace 10 min `400` · duplicado |
-| Topología y grupos (R14, R20) | Laboratorio | [`kafka-lab.md`](kafka-lab.md) |
+| Firma (R16) | Unitaria + manual | Firma determinista con un `now` fijo y HMAC recalculado de forma independiente · la aceptación por `merchant-sim` se verifica en vivo con `check-webhook.sh` y los logs |
+| Retry/DLT (R18) | Unitaria | Reintentable → retry con backoff correcto · intento 4 → DLT · no reintentable → DLT directo · se conserva la clave |
+| Clasificación HTTP en `deliver` (R18) | Manual (`FAIL_RATE`) | `5xx` → retry · `400`/`401` → DLT · éxito → fila en `notifier.deliveries`. Pendiente: prueba unitaria con `fetch` simulado |
+| Ledger (R19) | Integración (Postgres de Testcontainers con la migración real) | Aplica una vez · duplicado → sin cambios · tipo distinto → ignorado sin marca · saldos = suma de aprobados por comercio y moneda · dos aplicaciones simultáneas del mismo evento → solo una aplica · fallo en el saldo → la marca también se revierte · `parseEvent` rechaza lo no JSON y los aprobados sin monto válido |
+| Receptor (R17) | Manual (`curl` + `openssl` para firmar) | Firma válida `200` · cuerpo alterado `401` · `t` alterado sin volver a firmar `401` · `t` de hace 10 min `400` · sin cabecera `400` · cuerpo no JSON con firma válida `400` · duplicado `200` · `FAIL_RATE` ≈ proporción de `500` |
+| Topología y grupos (R14, R20) | Laboratorio | `kafka-lab.md` (archivo local, no versionado) |
 
 ---
 
@@ -370,13 +387,20 @@ v1 = hex( HMAC-SHA256( secreto, "<t>.<cuerpo_crudo>" ) )
 | D9 | **Schema por servicio en una sola instancia** | Una base por servicio | Aislamiento lógico con costo cero en el laboratorio. Migrar a bases separadas no cambia el código |
 | D10 | **Eventos con estado completo** | Solo el id (*notificación*) | Los consumidores no dependen de que `payments-api` esté disponible |
 | D11 | **Limpieza del outbox con `@Cron` diario dentro del relay** | `@Interval(24 h)` · particionar `outbox` por fecha · retención en un job externo | El contador de `@Interval` se reinicia en cada despliegue: con más de un despliegue al día no se ejecutaría nunca. El `DELETE` diario basta para el volumen del laboratorio; con mucho volumen, particionar por día y hacer `DROP PARTITION` evita el costo del `DELETE` |
+| D12 | **Ledger como servicio aparte (`apps/ledger`)** | Segundo punto de entrada dentro de `apps/notifier` | Aísla los fallos (un error de build o un crash del ledger no afecta al notifier, R20), permite escalar cada uno por separado (T22) y mantiene dependencias mínimas. El costo es repetir `Dockerfile`, `tsconfig.json` y `package.json` |
+| D13 | **Saldo por comercio y moneda** | Saldo solo por comercio | Los pagos pueden ser en COP o USD; sumarlos en una sola cifra no tiene significado contable |
+| D14 | **Mensajes inválidos en el ledger: registrar y saltar** | DLT propio (`ledger.dlt`) · bloquear la partición | Un mensaje ilegible no puede ser un pago aprobado legible, así que saltarlo no altera saldos. Un DLT propio sería más robusto para auditoría, pero agrega un topic y un proceso de reproceso que el laboratorio no necesita |
 
 ---
 
 ## 14. Limitaciones conocidas
 
 - **Un solo comercio y un solo secreto:** no hay registro de comercios con su URL y secreto, ni rotación de secretos. Para la rotación, el formato admite varias firmas `v1` durante una transición, pero aún no se implementa.
-- **Orden no estricto tras reintentos:** mitigado con `occurredAt` del lado del receptor (§ 9).
+- **Orden no estricto tras reintentos:** el comercio debe usar `occurredAt` para descartar eventos antiguos (§ 9); `merchant-sim` no lo implementa.
 - **`merchant-sim` deduplica en memoria:** pierde su registro al reiniciarse; un receptor real lo persistiría.
 - **Relay sin alta disponibilidad:** si su única instancia cae, los eventos esperan en el outbox hasta que vuelva. No se pierden, pero se retrasan. Esto se mejorará con *leader election* en Kubernetes.
 - **Broker único:** sin tolerancia a fallos de Kafka (`replication.factor = 1`).
+- **El ledger solo conoce lo publicado:** los pagos anteriores al outbox (T16), incluido el seed de un millón de pagos de la Fase 1, nunca generaron eventos y no forman parte de los saldos.
+- **Reconstrucción limitada a la retención:** reiniciar los offsets del grupo `ledger` reconstruye solo lo que siga en `payments.events` (7 días). Una reconstrucción completa requeriría *snapshots* periódicos de los saldos o un topic compactado.
+- **`ledger.processed_events` crece sin límite:** podría purgarse lo que sea más antiguo que la retención del topic, porque ningún duplicado puede llegar después.
+- **Mensajes inválidos del ledger solo en el log:** no hay un DLT propio para auditarlos o reprocesarlos (D14).

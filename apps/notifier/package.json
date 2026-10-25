@@ -1,0 +1,30 @@
+{
+  "name": "notifier",
+  "version": "1.0.0",
+  "description": "",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "dlt:replay": "node dist/dlt-replay.js",
+    "dlt:replay:dev": "tsx src/dlt-replay.ts"
+  },
+  "keywords": [],
+  "author": "CGR",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0",
+    "vitest": "^5.0.5"
+  }
+}

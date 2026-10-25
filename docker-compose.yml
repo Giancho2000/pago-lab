@@ -39,6 +39,15 @@ services:
       - "4000:4000"
     init: true
 
+  merchant-sim:
+    build: ./apps/merchant-sim
+    environment:
+      WEBHOOK_SECRET: whsec_local
+      FAIL_RATE: "${FAIL_RATE:-0.2}"
+    ports:
+      - "4100:4100"
+    init: true
+
   payments-api:
     build: ./apps/payments-api
     environment:
@@ -106,7 +115,35 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+  
+  notifier:
+    build: ./apps/notifier
+    environment:
+      DATABASE_URL: postgres://pagolab:pagolab@postgres:5432/pagolab
+      KAFKA_BROKERS: kafka:9092
+      MERCHANT_WEBHOOK_URL: http://merchant-sim:4100/webhooks/pagolab
+      WEBHOOK_SECRET: whsec_local
+    init: true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      merchant-sim:
+        condition: service_started
 
+  ledger:
+    build: ./apps/ledger
+    environment:
+      DATABASE_URL: postgres://pagolab:pagolab@postgres:5432/pagolab
+      KAFKA_BROKERS: kafka:9092
+    init: true
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+        
 volumes:
   pgdata:
   kafkadata:
