@@ -260,7 +260,7 @@ components:
           description: Número de intento (1, 2, 3…). Como cabecera de Kafka viaja como texto.
         not-before:
           type: string
-          description: Instante (epoch en milisegundos) a partir del cual puede reintentarse.
+          description: Instante (epoch en milisegundos) a partir del cual puede reintentarse. En el DLT no tiene significado.
         last-error:
           type: string
           maxLength: 500
@@ -268,3 +268,10 @@ components:
         original-topic:
           type: string
           const: payments.events
+        event-id:
+          type: string
+          format: uuid
+          description: Copiada del mensaje original.
+        event-type:
+          type: string
+          description: Copiada del mensaje original.

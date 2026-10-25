@@ -4,7 +4,7 @@ Requisitos: [`requirements.md`](requirements.md) · Diseño: [`design.md`](desig
 
 **Modalidad:** el código de producción lo escribes a mano, siguiendo la guía del laboratorio. Este plan indica, por ticket, qué requisitos cumple, qué entregar y cómo verificarlo. Las pruebas y la documentación pueden apoyarse en Claude.
 
-**Convenciones:** una rama por ticket (`gianca/tNN`), un commit con el mensaje indicado y un PR hacia `main`.
+**Convenciones:** una rama por ticket (`gianca/tNN`), un commit con el mensaje indicado y un PR hacia `develop`. Al cerrar la fase, `develop` se integra en `main` con un PR de release.
 
 ---
 
@@ -34,11 +34,12 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 | A18 | `apps/notifier/src/main.ts` (T20) | Bandera `stopping` en la espera de `notifier-retry`: ante `SIGTERM` sale sin hacer commit, en lugar de esperar hasta 120 s y terminar con `SIGKILL` |
 | A19 | `apps/notifier/src/main.ts` (T20) | `fromBeginning: true` en `notifier-retry`, para que el grupo, al crearse, no se salte mensajes ya derivados |
 | A20 | `apps/notifier/src/dlt-replay.ts` (T20) | La guía no trae código. Antes de consumir, el script toma una foto de los offsets del DLT (`fetchTopicOffsets`) y de los del grupo (`fetchOffsets`), y termina al alcanzarla. Sin la foto, un consumidor de Kafka nunca sabe que "se acabó" |
+| A21 | Build del notifier | Vitest no verifica tipos. Ejecuta `npm test && npx tsc --noEmit`: si `tsc` falla, el build de Docker también falla y Compose **sigue corriendo la imagen anterior** sin avisar |
 | A22 | Migración `create_ledger_schema` (T21) | `merchant_balances` con PK `(merchant_id, currency)`, `approved_cents bigint` y `CHECK ≥ 0`. La guía sumaba COP y USD en una sola cifra |
 | A23 | `apps/ledger/src/main.ts` (T21) | `parseEvent` + `InvalidEventError`: un mensaje inválido se registra y se salta. Sin esto, el mensaje venenoso de T20 bloquea el ledger en su primer arranque. Un error de base de datos se relanza para no saltarse pagos reales |
 | A24 | Verificación de T21 | El seed de T12 tiene unos 250 000 pagos aprobados sin evento: se comparan solo los que tienen `payment.approved` en el outbox, con una consulta de diferencias (`FULL JOIN` + `IS DISTINCT FROM`) |
 | A25 | `specs/fase-2/kafka-lab.md`, `sqs-lab.md` | Son plantillas de laboratorio locales: se excluyen en `.git/info/exclude` y no se versionan |
-| A21 | Build del notifier | Vitest no verifica tipos. Ejecuta `npm test && npx tsc --noEmit`: si `tsc` falla, el build de Docker también falla y Compose **sigue corriendo la imagen anterior** sin avisar |
+| A26 | Cierre de la fase (T24) | T22 y T23 son laboratorios de estudio sin código de producción: quedan como ejercicios locales y **no bloquean** el cierre. T23 se pospone; su código (`infra/elasticmq`, `labs/sqs`) se agregará cuando se realice |
 
 ---
 
@@ -118,7 +119,7 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
   - Proyecto `apps/notifier` (TypeScript, ESM) con `signing.ts`, `deliver.ts` y `main.ts`.
   - Dockerfile multi-stage y servicio en Compose sin puertos.
 - **Verificación:**
-  - [x] Con `FAIL_RATE: "0"`, cada pago aprobado, rechazado o fallido genera un webhook verificado en los logs de `merchant-sim`.
+  - [x] Con `FAIL_RATE: "0"`, cada pago aprobado, rechazado, fallido o desconocido (`payment.unknown`) genera un webhook verificado en los logs de `merchant-sim`.
   - [x] Reiniciar el notifier no reenvía lo ya entregado.
   - [x] Pruebas unitarias de `signWebhook`.
 - **Commit:** `feat: notifier con commits manuales y entrega idempotente`
@@ -162,18 +163,20 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 ### T22 · Laboratorio de consumer groups
 - **Requisitos:** R20 (evidencia)
 - **Entregables:** `kafka-lab.md` (local, no versionado, A25) completo con los 9 experimentos y capturas.
-- **Commit:** `docs: laboratorio de consumer groups, rebalanceo, lag y replay`
+- **Estado:** laboratorio local de estudio, sin commit (A26).
 
 ### T23 · Laboratorio SQS con ElasticMQ
 - **Requisitos:** — (comparativa conceptual)
 - **Entregables:** `infra/elasticmq/elasticmq.conf`, servicio con perfil `sqs`, `labs/sqs/lab.ts` y `sqs-lab.md` (local, no versionado, A25) completo.
-- **Commit:** `docs: laboratorio sqs con elasticmq y comparacion con kafka`
+- **Estado:** pospuesto (A26).
+- **Commit (cuando se realice):** `docs: laboratorio sqs con elasticmq y comparacion con kafka`
 
 ### T24 · Cierre de la fase
 - **Entregables:**
-  - [ ] Revisar estos specs contra lo implementado. Si algo cambió, actualizar el spec: es documentación viva.
-  - [ ] README: arquitectura de la fase 2, servicios nuevos y cómo ver los eventos en Kafka UI.
-  - [ ] Autoevaluación sin mirar: P5.1–P5.5, orden en Kafka, visibility timeout, P14.2 y P14.4.
+  - [x] Revisar estos specs contra lo implementado. Si algo cambió, actualizar el spec: es documentación viva.
+  - [x] README: arquitectura de la fase 2, servicios nuevos y cómo ver los eventos en Kafka UI.
+  - [ ] Autoevaluación sin mirar (local, no versionada): P5.1–P5.5, orden en Kafka, visibility timeout, P14.2 y P14.4.
+  - [x] Preparación open source: licencia MIT, secciones *Contribuir* y *Licencia*, `.env.example` con valores locales y artefactos de build fuera del repositorio.
 - **Commit:** `docs: cierre de la fase 2`
 
 ---
@@ -192,8 +195,9 @@ flowchart LR
   T20 --> T22
   T21 --> T22
   T15 --> T23
-  T22 --> T24
-  T23 --> T24
+  T21 --> T24
+  T22 -.-> T24
+  T23 -.-> T24
 ```
 
-T14 y T15 son independientes entre sí y pueden hacerse en cualquier orden.
+T14 y T15 son independientes entre sí y pueden hacerse en cualquier orden. Las líneas punteadas hacia T24 son laboratorios opcionales (A26).
