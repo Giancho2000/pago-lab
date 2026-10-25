@@ -121,7 +121,7 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
 - **Verificación:**
   - [x] Con `FAIL_RATE: "0"`, cada pago aprobado, rechazado, fallido o desconocido (`payment.unknown`) genera un webhook verificado en los logs de `merchant-sim`.
   - [x] Reiniciar el notifier no reenvía lo ya entregado.
-  - [x] Pruebas unitarias de `signWebhook`.
+  - [x] Pruebas unitarias de `signWebhook` y de `deliver` (añadidas en el cierre de la fase).
 - **Commit:** `feat: notifier con commits manuales y entrega idempotente`
 
 ### T20 · Retry topic con backoff y DLT
