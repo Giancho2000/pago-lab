@@ -17,6 +17,7 @@ El proyecto sigue un enfoque **Spec-Driven Development (SDD)**: primero se escri
 
 La Fase 3 (OAuth2 y server MCP) es la siguiente. El plan completo está en la [hoja de ruta](#hoja-de-ruta).
 
+![Un pago recorre el sistema: evento en Kafka, webhook firmado y saldo en el ledger](docs/img/demo.gif)
 
 ---
 
