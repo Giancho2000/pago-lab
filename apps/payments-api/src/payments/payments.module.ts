@@ -5,9 +5,14 @@ import { PaymentsService } from './payments.service.js';
 import { IdempotencyService } from './idempotency.service.js';
 import { GatewayClient } from './gateway.client.js';
 import { UnknownPaymentsResolver } from './unknown-payments.resolver.js';
+import { MerchantRateLimiter } from '../common/rate-limit/merchant-rate-limiter.js';
+import { MerchantRateLimitGuard } from '../common/rate-limit/merchant-rate-limit.guard.js';
 
 @Module({
   controllers: [PaymentsController],
-  providers: [PaymentsRepository, PaymentsService, IdempotencyService, GatewayClient, UnknownPaymentsResolver],
+  providers: [
+    PaymentsRepository, PaymentsService, IdempotencyService, GatewayClient, UnknownPaymentsResolver,
+    MerchantRateLimiter, MerchantRateLimitGuard,
+  ],
 })
 export class PaymentsModule {}

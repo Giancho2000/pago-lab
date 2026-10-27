@@ -1,9 +1,10 @@
 import {
-  BadRequestException, Body, Controller, Get, Headers, HttpStatus, Param, ParseUUIDPipe, Post, Query, Res,
+  BadRequestException, Body, Controller, Get, Headers, HttpStatus, Param, ParseUUIDPipe, Post, Query, Res, UseGuards,
 } from '@nestjs/common';
 import { isUUID } from 'class-validator';
 import type { Response } from 'express';
 import { MerchantId } from '../common/merchant-id.decorator.js';
+import { MerchantRateLimitGuard } from '../common/rate-limit/merchant-rate-limit.guard.js';
 import { Payment } from './domain/payment.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { IdempotencyService } from './idempotency.service.js';
@@ -19,6 +20,7 @@ export class PaymentsController {
   ) {}
 
   @Post()
+  @UseGuards(MerchantRateLimitGuard) // antes del body y de la Idempotency-Key: un 429 no deja rastro
   async create(
     @MerchantId() merchantId: string,
     @Headers('idempotency-key') key: string | undefined,
