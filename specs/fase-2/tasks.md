@@ -179,6 +179,18 @@ El repositorio usa **ESM con `module: nodenext`** y **Vitest con Testcontainers*
   - [x] Preparación open source: licencia MIT, secciones *Contribuir* y *Licencia*, `.env.example` con valores locales y artefactos de build fuera del repositorio.
 - **Commit:** `docs: cierre de la fase 2`
 
+### T25 · Límite de tasa por comercio
+- **Requisitos:** R23
+- **Entregables:**
+  - Contrato: `429` y cabeceras `RateLimit-*`/`Retry-After` en `openapi.yaml` (*spec first*).
+  - Migración `create_rate_limit_buckets`.
+  - `MerchantRateLimiter` (token bucket en una sola sentencia) y `MerchantRateLimitGuard` sobre `POST /payments`.
+- **Verificación:**
+  - [x] Pruebas unitarias del guard y de la configuración.
+  - [x] Pruebas de integración: `429` sin cobrar ni reclamar la clave, recarga, baldes por comercio, concurrencia y reintento con la misma clave.
+  - [x] Ráfaga de 40 pagos con `create-payments.mjs`: 31 `201`/`202` y 9 `429`.
+- **Commit:** `feat: limite de tasa por comercio con token bucket en postgres`
+
 ---
 
 ## Orden y dependencias

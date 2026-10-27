@@ -58,6 +58,8 @@ services:
       RESOLVER_ENABLED: "true"
       KAFKA_BROKERS: kafka:9092  
       RELAY_ENABLED: "true"
+      RATE_LIMIT_BURST: "${RATE_LIMIT_BURST:-30}"
+      RATE_LIMIT_PER_SECOND: "${RATE_LIMIT_PER_SECOND:-10}"
     ports:
       - "3000:3000"
     init: true

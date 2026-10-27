@@ -390,6 +390,7 @@ El fallo simulado (`FAIL_RATE`) se aplica solo a webhooks válidos, entre los pa
 | D12 | **Ledger como servicio aparte (`apps/ledger`)** | Segundo punto de entrada dentro de `apps/notifier` | Aísla los fallos (un error de build o un crash del ledger no afecta al notifier, R20), permite escalar cada uno por separado (T22) y mantiene dependencias mínimas. El costo es repetir `Dockerfile`, `tsconfig.json` y `package.json` |
 | D13 | **Saldo por comercio y moneda** | Saldo solo por comercio | Los pagos pueden ser en COP o USD; sumarlos en una sola cifra no tiene significado contable |
 | D14 | **Mensajes inválidos en el ledger: registrar y saltar** | DLT propio (`ledger.dlt`) · bloquear la partición | Un mensaje ilegible no puede ser un pago aprobado legible, así que saltarlo no altera saldos. Un DLT propio sería más robusto para auditoría, pero agrega un topic y un proceso de reproceso que el laboratorio no necesita |
+| D15 | **Rate limit con *token bucket* en PostgreSQL (R23)** | `@nestjs/throttler` en memoria · ventana fija · Redis | En memoria, el límite se multiplica por el número de réplicas. La ventana fija permite el doble de la tasa en el borde entre ventanas. Redis sería lo habitual en producción, pero agrega un servicio. Una fila por comercio y una sola sentencia `INSERT … ON CONFLICT DO UPDATE … WHERE` recargan y consumen de forma atómica; el costo es un viaje a la base de datos por creación |
 
 ---
 

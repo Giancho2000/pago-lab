@@ -140,6 +140,16 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 - THE SYSTEM SHALL cubrir con pruebas de integración contra PostgreSQL real los requisitos R11 y R12.
 - THE SYSTEM SHALL cubrir con pruebas unitarias la firma y la entrega de webhooks (R16), la clasificación de errores y la decisión entre reintento y DLT (R18), y con pruebas de integración la aplicación idempotente del ledger (R19).
 
+## R23 · Límite de tasa por comercio
+*Ticket T25 (añadido después del cierre de la fase)*
+
+- THE SYSTEM SHALL limitar la creación de pagos por comercio con un *token bucket* de capacidad `RATE_LIMIT_BURST` (30 por defecto) que se recarga a `RATE_LIMIT_PER_SECOND` tokens por segundo (10 por defecto).
+- THE SYSTEM SHALL aplicar el mismo límite con cualquier número de réplicas de la API.
+- WHEN un comercio crea un pago dentro de su límite, THE SYSTEM SHALL incluir en la respuesta las cabeceras `RateLimit-Limit` y `RateLimit-Remaining`.
+- IF un comercio supera su límite, THEN THE SYSTEM SHALL responder `429` en formato RFC 9457 con la cabecera `Retry-After` en segundos, sin reclamar la `Idempotency-Key` y sin llamar a la pasarela.
+- IF el limitador no está disponible, THEN THE SYSTEM SHALL permitir la petición y registrar una advertencia (*fail open*).
+- WHERE `RATE_LIMIT_ENABLED` es `false`, THE SYSTEM SHALL no aplicar el límite.
+
 ---
 
 ## Fuera de alcance
@@ -166,3 +176,4 @@ Diseño: [`design.md`](design.md) · Plan de implementación: [`tasks.md`](tasks
 | R20 | T19–T22 | Laboratorio de consumer groups (`kafka-lab.md`, archivo local no versionado) |
 | R21 | T17–T21 | `docker compose stop` y revisión de logs |
 | R22 | Todos | `npm run test:cov` |
+| R23 | T25 | Pruebas unitarias del guard, prueba de integración (`rate-limit.e2e-spec.ts`) y ráfaga con `create-payments.mjs` |
