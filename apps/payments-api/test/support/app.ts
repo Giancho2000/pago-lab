@@ -35,6 +35,7 @@ export async function createTestApp(
     RESOLVER_ENABLED: 'false', // el resolver se invoca a mano en las pruebas
     RELAY_ENABLED: 'false', // el relay también
     KAFKA_BROKERS: 'localhost:9', // no se lee (el factory queda reemplazado), pero no depende del .env
+    RATE_LIMIT_ENABLED: 'false', // solo rate-limit.e2e-spec.ts lo activa, con límites pequeños
     ...env,
   });
 
@@ -52,5 +53,5 @@ export async function createTestApp(
 }
 
 export async function truncateAll(pool: Pool) {
-  await pool.query('TRUNCATE outbox, payment_events, payments, idempotency_keys');
+  await pool.query('TRUNCATE outbox, payment_events, payments, idempotency_keys, rate_limit_buckets');
 }

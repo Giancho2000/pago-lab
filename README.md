@@ -47,6 +47,7 @@ La Fase 3 (OAuth2 y server MCP) es la siguiente. El plan completo está en la [h
 | Tema | Cómo se resuelve en PagoLab |
 |---|---|
 | **Idempotencia** | Cabecera `Idempotency-Key` con reclamo atómico (`INSERT … ON CONFLICT DO NOTHING`). Si se repite la petición, devuelve la respuesta original con `Idempotent-Replayed: true`. Responde `422` si el cuerpo es distinto y `409` si la petición original sigue en curso. |
+| **Límite de tasa por comercio** | *Token bucket* en PostgreSQL (ráfaga de 30 y 10 creaciones por segundo, configurables) con una sola sentencia atómica, así que el límite es el mismo con cualquier número de réplicas. Responde `429` con `Retry-After` **antes** de reclamar la `Idempotency-Key`, de modo que reintentar con la misma clave es seguro. |
 | **Prevención de doble cobro** | El id del pago viaja como clave de idempotencia hacia la pasarela, y cada cambio de estado es un `UPDATE … WHERE status = $from`: si otro proceso se adelantó, la operación no tiene efecto. |
 | **Timeouts honestos** | Si la pasarela no responde dentro de `GATEWAY_TIMEOUT_MS`, el pago queda en `UNKNOWN` (`202`), **nunca** en `FAILED`: no hay certeza de que el cobro no ocurrió. |
 | **Recuperación de claves huérfanas** | Si el proceso muere a mitad de un cobro, la clave queda `IN_PROGRESS`. Pasado `locked_until`, un reintento la recupera: si el pago ya existe devuelve ese mismo pago (sin volver a cobrar) y, si no, la procesa como nueva. Un índice único `(merchant_id, idempotency_key)` es la segunda barrera en la base de datos. |
@@ -156,7 +157,7 @@ pagos-lab/
 │   ├── payments-api/            # API de pagos (NestJS)
 │   │   ├── docs/openapi.yaml    # Contrato de la API (fuente de verdad)
 │   │   ├── src/
-│   │   │   ├── common/          # Filtro RFC 9457, transacciones, X-Merchant-Id
+│   │   │   ├── common/          # Filtro RFC 9457, transacciones, X-Merchant-Id y rate limit
 │   │   │   ├── database/        # Pool de PostgreSQL y cierre ordenado
 │   │   │   ├── health/          # Liveness y readiness
 │   │   │   ├── messaging/       # Productor de Kafka y relay del outbox
@@ -241,6 +242,9 @@ npm run start:dev
 | `RESOLVER_ENABLED` | Activa el resolver de pagos `UNKNOWN` | `true` |
 | `KAFKA_BROKERS` | Brokers de Kafka | `localhost:29092` (en Compose: `kafka:9092`) |
 | `RELAY_ENABLED` | Activa el relay del outbox. Debe estar activo en **una sola** instancia para conservar el orden de los eventos | `true` |
+| `RATE_LIMIT_ENABLED` | Activa el límite de creación de pagos por comercio | `true` |
+| `RATE_LIMIT_BURST` | Capacidad del *token bucket*: ráfaga máxima de creaciones por comercio | `30` |
+| `RATE_LIMIT_PER_SECOND` | Tokens que se recargan por segundo (ritmo sostenido por comercio) | `10` |
 
 ### Detener
 
@@ -257,7 +261,7 @@ Todas las peticiones requieren la cabecera `X-Merchant-Id`, que identifica al co
 
 | Método | Ruta | Descripción | Respuestas |
 |---|---|---|---|
-| `POST` | `/payments` | Crea un pago y lo cobra en la pasarela. Requiere `Idempotency-Key` (UUID). | `201` estado final · `202` `UNKNOWN` · `400` · `401` · `409` · `422` |
+| `POST` | `/payments` | Crea un pago y lo cobra en la pasarela. Requiere `Idempotency-Key` (UUID). Limitado por comercio | `201` estado final · `202` `UNKNOWN` · `400` · `401` · `409` · `422` · `429` |
 | `GET` | `/payments/{id}` | Consulta un pago del comercio | `200` · `400` · `401` · `404` |
 | `GET` | `/payments?limit=&cursor=` | Lista los pagos del comercio, del más reciente al más antiguo | `200` · `400` · `401` |
 | `GET` | `/health/live` | El proceso responde | `200` |
@@ -292,6 +296,25 @@ Location: /payments/7c1e…
   "updatedAt": "…"
 }
 ```
+
+### Límite de tasa
+
+La creación de pagos está limitada **por comercio** con un *token bucket*: cada comercio tiene un balde de 30 tokens que se recarga a 10 por segundo. Cada `POST /payments` gasta un token; un doble clic o un lote corto pasan sin problema, pero un cliente en bucle recibe `429`.
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+RateLimit-Limit: 30
+RateLimit-Remaining: 0
+Content-Type: application/problem+json
+
+{ "type": "about:blank", "title": "TOO_MANY_REQUESTS", "status": 429,
+  "detail": "Límite de creación de pagos superado para el comercio; reintenta en 1 s", "instance": "/payments" }
+```
+
+- Las respuestas `201`/`202` incluyen `RateLimit-Limit` y `RateLimit-Remaining` para que el cliente regule su ritmo.
+- El `429` ocurre antes de reclamar la `Idempotency-Key` y de llamar a la pasarela: no queda rastro, así que se reintenta con la misma clave tras `Retry-After`.
+- Para verlo: `node scripts/create-payments.mjs 40` envía 40 pagos simultáneos del mismo comercio; unos 30 pasan y el resto recibe `429`.
 
 El listado devuelve `{ "items": [...], "nextCursor": "…" }`. Para pedir la página siguiente se envía ese valor en `cursor`; `nextCursor` es `null` cuando no hay más páginas.
 
@@ -478,7 +501,7 @@ El reporte HTML queda en `apps/payments-api/coverage/index.html`.
 Desde `apps/notifier` y `apps/ledger`, `npm test` ejecuta las pruebas de cada servicio; las del ledger necesitan Docker (Testcontainers). Vitest no verifica tipos, así que conviene acompañarlo de `npx tsc --noEmit`, que es el mismo chequeo que corre el build de Docker.
 
 **Estado actual:**
-- `payments-api`: 107 pruebas en verde · **96,7 %** de cobertura de líneas.
+- `payments-api`: 125 pruebas en verde · **97,1 %** de cobertura de líneas.
 - `notifier`: 25 pruebas unitarias (firma, entrega de webhooks y decisión entre reintento y DLT).
 - `ledger`: 7 pruebas (integración de `apply` contra PostgreSQL y validación de eventos).
 
@@ -497,7 +520,8 @@ Desde `apps/notifier` y `apps/ledger`, `npm test` ejecuta las pruebas de cada se
   - timeout que deja el pago en `UNKNOWN` aunque la pasarela sí haya cobrado;
   - dos resolvers concurrentes que nunca procesan el mismo pago;
   - paginación completa siguiendo `nextCursor`, con empates de `created_at` y pagos creados en el mismo milisegundo;
-  - `503` en readiness durante el apagado y cierre del pool.
+  - `503` en readiness durante el apagado y cierre del pool;
+  - límite por comercio: `429` con `Retry-After` sin cobrar ni reclamar la clave, recarga con el tiempo, baldes independientes por comercio, consumos concurrentes que nunca gastan el mismo token y reintento seguro con la misma clave.
 - **Cobertura honesta:** se mide sobre todo `src/`, no solo sobre los archivos que importan las pruebas.
 
 ---
@@ -553,6 +577,7 @@ CREATE INDEX CONCURRENTLY idx_payments_merchant_created
 - **Evento con estado (*event-carried state*):** el evento lleva los datos del pago, así que el comercio no necesita consultar la API para saber qué pasó.
 - **Un schema por consumidor:** `notifier` es dueño de `notifier.*` y `ledger` de `ledger.*`; ninguno lee tablas de otros servicios. Comparten instancia de PostgreSQL solo por economía del laboratorio.
 - **Ledger como servicio aparte:** en lugar de un segundo punto de entrada dentro del notifier, para aislar fallos y escalar cada uno por separado.
+- **Rate limit en PostgreSQL y no en memoria:** un contador en memoria se multiplica por el número de réplicas (3 réplicas = 3 veces el límite). En la base de datos, una sola sentencia `INSERT … ON CONFLICT DO UPDATE … WHERE` recarga y consume de forma atómica. Si el limitador falla, la petición pasa (*fail open*): el límite protege, pero no debe ser la causa de que un pago falle.
 - **Fallos distintos, tratamientos distintos:** si el comercio falla, el notifier aparta el mensaje (retry/DLT) y sigue con los demás. Si la base de datos del ledger falla, el ledger **se detiene** y reintenta: saltarse un pago aprobado dejaría un saldo incorrecto. Un mensaje ilegible, en cambio, se registra y se salta, porque nunca podrá procesarse.
 
 ### Limitaciones conocidas
@@ -565,6 +590,7 @@ CREATE INDEX CONCURRENTLY idx_payments_merchant_created
 - **Relay en una sola instancia:** con dos relays activos, los eventos de un mismo pago podrían publicarse fuera de orden.
 - **Deduplicación del comercio en memoria:** `merchant-sim` olvida los `eventId` recibidos al reiniciarse.
 - **Autenticación temporal:** `X-Merchant-Id` simula la identidad del comercio sin verificarla. *Se reemplaza por OAuth2/JWT en la Fase 3.*
+- **El límite de tasa se puede esquivar mientras no haya autenticación:** como `X-Merchant-Id` no se verifica, cambiarlo en cada petición da un balde nuevo. Con OAuth2 (Fase 3) el límite se aplicará sobre una identidad confiable. Solo se limita la creación de pagos; las consultas no tienen límite.
 - **Pasarela en memoria:** `gateway-sim` pierde sus cobros al reiniciarse, lo que puede llevar a `FAILED` pagos que sí se cobraron.
 
 El detalle del diseño está en [`specs/fase-1/design.md`](specs/fase-1/design.md) y [`specs/fase-2/design.md`](specs/fase-2/design.md).
@@ -687,6 +713,7 @@ La Fase 2 se construyó en estos tickets:
 | T20 | Retry topic con backoff y DLT |
 | T21 | Ledger con efecto exactamente una vez |
 | T24 | Cierre de la fase: specs revisados, pruebas de entrega del notifier, Kafka UI y publicación open source |
+| T25 | Límite de tasa por comercio con *token bucket* en PostgreSQL |
 
 Los laboratorios prácticos de consumer groups (T22) y de SQS con ElasticMQ (T23) quedan como ejercicios de estudio y no forman parte del código publicado.
 

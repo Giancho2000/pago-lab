@@ -19,7 +19,7 @@ La visión general del proyecto, la arquitectura completa y el guion de demostra
 | `OutboxRelay` | `src/messaging/` | Cada 1 s publica el outbox en `payments.events` (`key = paymentId`, `acks=all`) y purga a diario lo publicado hace más de 7 días |
 | `KafkaModule` | `src/messaging/` | Productor idempotente de Kafka; se desconecta al apagar la aplicación |
 | Health | `src/health/` | `/health/live` y `/health/ready` |
-| Comunes | `src/common/` | Errores RFC 9457, helper de transacciones y decorador `X-Merchant-Id` |
+| Comunes | `src/common/` | Errores RFC 9457, helper de transacciones, decorador `X-Merchant-Id` y rate limit por comercio (`rate-limit/`) |
 
 El contrato HTTP es [`docs/openapi.yaml`](docs/openapi.yaml), servido con Swagger UI en `/docs`. El contrato de los eventos es [`specs/fase-2/asyncapi.yaml`](../../specs/fase-2/asyncapi.yaml).
 
@@ -58,6 +58,9 @@ npm run start:dev
 | `RESOLVER_ENABLED` | Activa el resolver de pagos `UNKNOWN` | `true` |
 | `KAFKA_BROKERS` | Brokers de Kafka | `localhost:29092` (en Compose: `kafka:9092`) |
 | `RELAY_ENABLED` | Activa el relay del outbox. Solo **una** instancia debe tenerlo activo, para conservar el orden de los eventos | `true` |
+| `RATE_LIMIT_ENABLED` | Activa el límite de creación de pagos por comercio | `true` |
+| `RATE_LIMIT_BURST` | Capacidad del *token bucket*: ráfaga máxima de creaciones por comercio | `30` |
+| `RATE_LIMIT_PER_SECOND` | Tokens que se recargan por segundo (ritmo sostenido por comercio) | `10` |
 
 Si ejecutas la API en local mientras el contenedor `payments-api` sigue corriendo, deja `RELAY_ENABLED=false` en una de las dos.
 
@@ -75,7 +78,7 @@ Si ejecutas la API en local mientras el contenedor `payments-api` sigue corriend
 | `npm run lint` | oxlint sobre `src/` y `test/` | No |
 | `npm run format` | Prettier sobre `src/` y `test/` | No |
 
-**Estado:** 107 pruebas en verde · 96,7 % de cobertura de líneas. El reporte HTML queda en `coverage/index.html`.
+**Estado:** 125 pruebas en verde · 97,1 % de cobertura de líneas. El reporte HTML queda en `coverage/index.html`.
 
 ### Cómo están armadas las pruebas
 
